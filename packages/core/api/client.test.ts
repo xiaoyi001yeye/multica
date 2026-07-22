@@ -6,6 +6,39 @@ afterEach(() => {
 });
 
 describe("ApiClient", () => {
+  it("uses the atomic project resource move endpoint", async () => {
+    const moved = {
+      id: "resource-1",
+      project_id: "project-1",
+      workspace_id: "workspace-1",
+      resource_type: "github_repo",
+      resource_ref: { url: "https://github.com/acme/repo.git" },
+      label: null,
+      position: 1,
+      created_at: "",
+      created_by: null,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(moved), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await expect(
+      client.moveProjectResource("project-1", "resource-1", "down"),
+    ).resolves.toMatchObject({ id: "resource-1", position: 1 });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/api/projects/project-1/resources/resource-1/move",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ direction: "down" }),
+      }),
+    );
+  });
+
   it("falls back when project resource responses are malformed", async () => {
     vi.stubGlobal(
       "fetch",

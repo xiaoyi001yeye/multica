@@ -657,6 +657,115 @@ func githubRepoURLConflictInRows(rows []db.ProjectResource, resourceType string,
 	return false, nil
 }
 
+type moveProjectResourceRequest struct {
+	Direction string `json:"direction"`
+}
+
+// MoveProjectResource reorders one resource within its exact resource-type
+// group. Normalization and the adjacent swap happen in one transaction so a
+// client/network failure cannot leave half of a two-row swap persisted.
+func (h *Handler) MoveProjectResource(w http.ResponseWriter, r *http.Request) {
+	project, ok := h.loadProjectForResource(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	resourceID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "resourceId"), "resource id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var req moveProjectResourceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !isOneOf(req.Direction, "up", "down") {
+		writeError(w, http.StatusBadRequest, "direction must be up or down")
+		return
+	}
+	if h.TxStarter == nil {
+		writeError(w, http.StatusInternalServerError, "database transaction support is unavailable")
+		return
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start resource reorder")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtext($1))`, "project_resources:"+uuidToString(project.ID)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock project resources")
+		return
+	}
+	qtx := db.New(tx)
+	existing, err := qtx.GetProjectResourceInWorkspace(r.Context(), db.GetProjectResourceInWorkspaceParams{
+		ID: resourceID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil || uuidToString(existing.ProjectID) != uuidToString(project.ID) {
+		writeError(w, http.StatusNotFound, "project resource not found")
+		return
+	}
+	rows, err := qtx.ListProjectResources(r.Context(), project.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list project resources")
+		return
+	}
+	group := make([]db.ProjectResource, 0, len(rows))
+	currentIndex := -1
+	for _, row := range rows {
+		if row.ResourceType != existing.ResourceType {
+			continue
+		}
+		if uuidToString(row.ID) == uuidToString(existing.ID) {
+			currentIndex = len(group)
+		}
+		group = append(group, row)
+	}
+	targetIndex := currentIndex - 1
+	if req.Direction == "down" {
+		targetIndex = currentIndex + 1
+	}
+	if currentIndex < 0 || targetIndex < 0 || targetIndex >= len(group) {
+		if err := tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit resource reorder")
+			return
+		}
+		writeJSON(w, http.StatusOK, projectResourceToResponse(existing))
+		return
+	}
+
+	updatedRows := make([]db.ProjectResource, 0, len(group))
+	var moved db.ProjectResource
+	for index, row := range group {
+		position := int32(index)
+		if index == currentIndex {
+			position = int32(targetIndex)
+		} else if index == targetIndex {
+			position = int32(currentIndex)
+		}
+		updated, err := qtx.UpdateProjectResource(r.Context(), db.UpdateProjectResourceParams{
+			ID: row.ID, ResourceRef: row.ResourceRef, Label: row.Label, Position: position,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to reorder project resources")
+			return
+		}
+		updatedRows = append(updatedRows, updated)
+		if uuidToString(updated.ID) == uuidToString(existing.ID) {
+			moved = updated
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit resource reorder")
+		return
+	}
+	for _, updated := range updatedRows {
+		h.publish(protocol.EventProjectResourceUpdated, uuidToString(project.WorkspaceID), "member", userID, map[string]any{
+			"resource": projectResourceToResponse(updated), "project_id": uuidToString(project.ID),
+		})
+	}
+	writeJSON(w, http.StatusOK, projectResourceToResponse(moved))
+}
+
 // DeleteProjectResource removes a resource from a project.
 func (h *Handler) DeleteProjectResource(w http.ResponseWriter, r *http.Request) {
 	project, ok := h.loadProjectForResource(w, r, chi.URLParam(r, "id"))

@@ -756,6 +756,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/resources", h.ListProjectResources)
 					r.Post("/resources", h.CreateProjectResource)
 					r.Put("/resources/{resourceId}", h.UpdateProjectResource)
+					r.Post("/resources/{resourceId}/move", h.MoveProjectResource)
 					r.Delete("/resources/{resourceId}", h.DeleteProjectResource)
 				})
 			})

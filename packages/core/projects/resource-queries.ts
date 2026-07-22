@@ -156,34 +156,12 @@ export function useMoveProjectResource(wsId: string, projectId: string) {
         });
       }
 
-	  const originalPositions = new Map(
-		(current?.resources ?? []).map((resource) => [resource.id, resource.position]),
-	  );
-	  const completed: typeof updates = [];
       try {
-		// Apply sequentially so a partial failure is observable and can be
-		// compensated. Promise.all could leave one server row updated while the
-		// client merely rolled its cache back.
-		for (const update of updates) {
-		  await api.updateProjectResource(projectId, update.resourceId, {
-			position: update.position,
-		  });
-		  completed.push(update);
-		}
+        if (updates.length > 0) {
+          await api.moveProjectResource(projectId, resourceId, direction);
+        }
         return updates;
       } catch (error) {
-		for (const update of completed.toReversed()) {
-		  const original = originalPositions.get(update.resourceId);
-		  if (original === undefined) continue;
-		  try {
-			await api.updateProjectResource(projectId, update.resourceId, {
-			  position: original,
-			});
-		  } catch {
-			// onSettled invalidates the query; retain the original error while
-			// ensuring the next render reflects authoritative server state.
-		  }
-		}
         if (current) qc.setQueryData(queryKey, current);
         throw error;
       }

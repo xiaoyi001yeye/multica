@@ -113,6 +113,7 @@
     "move_down": "下移",
     "toast_reorder_failed": "调整资源顺序失败",
     "toast_save_failed": "保存资源失败",
+    "toast_workspace_save_failed": "资源已添加，但工作区仓库列表更新失败",
     "remote_fallback": "远程回退资源",
     "used_on_this_machine": "在本机使用",
     "bound_to_other_daemon": "绑定到其他机器",

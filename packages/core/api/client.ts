@@ -1823,6 +1823,23 @@ export class ApiClient {
     });
   }
 
+  async moveProjectResource(
+    projectId: string,
+    resourceId: string,
+    direction: "up" | "down",
+  ): Promise<ProjectResource> {
+    const raw = await this.fetch<unknown>(
+      `/api/projects/${projectId}/resources/${resourceId}/move`,
+      {
+        method: "POST",
+        body: JSON.stringify({ direction }),
+      },
+    );
+    return parseWithFallback(raw, ProjectResourceSchema, EMPTY_PROJECT_RESOURCE, {
+      endpoint: "POST /api/projects/{id}/resources/{resourceId}/move",
+    });
+  }
+
   // Labels
   async listLabels(): Promise<ListLabelsResponse> {
     return this.fetch(`/api/labels`);

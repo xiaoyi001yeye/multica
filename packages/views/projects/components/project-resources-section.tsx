@@ -217,14 +217,10 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
 
           {unknownResources.length > 0 && (
             <ResourceGroup title={t(($) => $.resources.other_resources_group)}>
-              {unknownResources.map((resource, index) => (
+              {unknownResources.map((resource) => (
                 <UnknownResourceRow
                   key={resource.id}
                   resource={resource}
-                  canMoveUp={index > 0}
-                  canMoveDown={index < unknownResources.length - 1}
-                  onMove={move}
-                  onRemove={() => remove(resource)}
                 />
               ))}
             </ResourceGroup>
@@ -255,15 +251,9 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                 )}
                 pending={createResource.isPending}
                 onCreate={async (data, saveToWorkspace) => {
+                  let created: ProjectResource;
                   try {
-                    const created = await createResource.mutateAsync(data);
-                    if (
-                      saveToWorkspace &&
-                      created.resource_type === "github_repo" &&
-                      isGithubRef(created)
-                    ) {
-                      await saveWorkspaceRepository(created.resource_ref.url);
-                    }
+                    created = await createResource.mutateAsync(data);
                     setAddOpen(false);
                   } catch (error) {
                     toast.error(
@@ -271,6 +261,22 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                         ? error.message
                         : t(($) => $.resources.toast_save_failed),
                     );
+                    return;
+                  }
+                  if (
+                    saveToWorkspace &&
+                    created.resource_type === "github_repo" &&
+                    isGithubRef(created)
+                  ) {
+                    try {
+                      await saveWorkspaceRepository(created.resource_ref.url);
+                    } catch (error) {
+                      toast.error(
+                        error instanceof Error
+                          ? error.message
+                          : t(($) => $.resources.toast_workspace_save_failed),
+                      );
+                    }
                   }
                 }}
               />
@@ -301,16 +307,8 @@ function ResourceGroup({
 
 function UnknownResourceRow({
   resource,
-  canMoveUp,
-  canMoveDown,
-  onMove,
-  onRemove,
 }: {
   resource: ProjectResource;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
-  onMove: (resourceId: string, direction: "up" | "down") => Promise<void>;
-  onRemove: () => void;
 }) {
   return (
     <div className="group flex items-center gap-2 rounded-md border border-transparent px-1.5 py-1.5 hover:border-border hover:bg-accent/30">
@@ -323,12 +321,6 @@ function UnknownResourceRow({
           {resource.resource_type}
         </div>
       </div>
-      <RowActions
-        canMoveUp={canMoveUp}
-        canMoveDown={canMoveDown}
-        onMove={(direction) => void onMove(resource.id, direction)}
-        onRemove={onRemove}
-      />
     </div>
   );
 }

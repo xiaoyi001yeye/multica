@@ -113,6 +113,7 @@
     "move_down": "下へ移動",
     "toast_reorder_failed": "リソースの並べ替えに失敗しました",
     "toast_save_failed": "リソースの保存に失敗しました",
+    "toast_workspace_save_failed": "リソースは追加されましたが、ワークスペースのリポジトリ一覧を更新できませんでした",
     "remote_fallback": "Remote fallback",
     "used_on_this_machine": "このマシンで使用",
     "bound_to_other_daemon": "別のマシンにバインド済み",

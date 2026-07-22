@@ -113,6 +113,7 @@
     "move_down": "Move down",
     "toast_reorder_failed": "Failed to reorder resources",
     "toast_save_failed": "Failed to save resource",
+    "toast_workspace_save_failed": "Resource added, but the workspace repository list could not be updated",
     "remote_fallback": "Remote fallback",
     "used_on_this_machine": "Used on this machine",
     "bound_to_other_daemon": "Bound to another machine",

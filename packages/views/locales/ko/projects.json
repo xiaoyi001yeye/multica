@@ -113,6 +113,7 @@
     "move_down": "아래로 이동",
     "toast_reorder_failed": "리소스 순서를 변경하지 못했습니다",
     "toast_save_failed": "리소스를 저장하지 못했습니다",
+    "toast_workspace_save_failed": "리소스는 추가되었지만 워크스페이스 저장소 목록을 업데이트하지 못했습니다",
     "remote_fallback": "Remote fallback",
     "used_on_this_machine": "이 컴퓨터에서 사용",
     "bound_to_other_daemon": "다른 컴퓨터에 연결됨",
