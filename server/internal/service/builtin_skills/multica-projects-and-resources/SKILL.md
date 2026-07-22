@@ -28,7 +28,7 @@ A project's `description` is also durable context: when an issue (or a quick-cre
 
 Common resource types:
 
-- `github_repo` — durable GitHub repo context, with `resource_ref.url`, optional checkout `ref`, and optional prompt-only `default_branch_hint`;
+- `github_repo` — durable Git repository context (GitHub, GitLab, or self-hosted), with `resource_ref.url`, optional checkout `ref`, and optional prompt-only `default_branch_hint`, `role`, `provider`, and `pr_creation_guide`;
 - `local_directory` — daemon-local path context, with `resource_ref.local_path`, `daemon_id`, and optional label.
 
 ## CLI
@@ -46,7 +46,7 @@ multica project resource list <project-id> --output json
 multica project resource add <project-id> --type github_repo --url <github-url> --output json
 multica project resource add <project-id> --type github_repo --url <github-url> --ref <branch-or-sha> --output json
 multica project resource add <project-id> --type local_directory --local-path <abs-path> --daemon-id <daemon-id> --output json
-multica project resource update <project-id> <resource-id> --url <new-github-url> --output json
+multica project resource update <project-id> <resource-id> --default-branch-hint <branch> --output json
 multica project resource update <project-id> <resource-id> --ref <branch-or-sha> --output json
 multica project resource remove <project-id> <resource-id> --output json
 ```
@@ -66,10 +66,11 @@ is task-local checkout state.
 
 1. `multica project get <project-id> --output json`.
 2. `multica project resource list <project-id> --output json`.
-3. Check `github_repo.resource_ref.url`, optional `ref`, `default_branch_hint`, and `local_directory.resource_ref.daemon_id`.
-4. Updating resources is a durable mutation. After an update, listing the
+3. Check `github_repo.resource_ref.url`, optional `ref`, `default_branch_hint`, `provider`, `role`, and `local_directory.resource_ref.daemon_id`.
+4. Repository URLs and local-directory daemon IDs are identities: remove and add a resource instead of updating either field.
+5. Updating resources is a durable mutation. After an update, listing the
    resource is the verification path.
-5. If resources match the expected task context, inspect runtime/repo checkout
+6. If resources match the expected task context, inspect runtime/repo checkout
    path next.
 
 ## Side effects

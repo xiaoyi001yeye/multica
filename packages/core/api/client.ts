@@ -187,6 +187,8 @@ import {
   EMPTY_AGENT_BUILDER_SESSION,
   EMPTY_GROUPED_ISSUES_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
+  EMPTY_LIST_PROJECT_RESOURCES_RESPONSE,
+  EMPTY_PROJECT_RESOURCE,
   EMPTY_SEARCH_ISSUES_RESPONSE,
   EMPTY_SEARCH_PROJECTS_RESPONSE,
   EMPTY_SQUAD,
@@ -206,6 +208,8 @@ import {
   CronPreviewResponseSchema,
   UNREADABLE_CRON_PREVIEW_RESPONSE,
   ListIssuesResponseSchema,
+  ListProjectResourcesResponseSchema,
+  ProjectResourceSchema,
   CreateIssueResponseSchema,
   ListWebhookDeliveriesResponseSchema,
   RuntimeHourlyActivityListSchema,
@@ -2186,16 +2190,25 @@ export class ApiClient {
   async listProjectResources(
     projectId: string,
   ): Promise<ListProjectResourcesResponse> {
-    return this.fetch(`/api/projects/${projectId}/resources`);
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/resources`);
+    return parseWithFallback(
+      raw,
+      ListProjectResourcesResponseSchema,
+      EMPTY_LIST_PROJECT_RESOURCES_RESPONSE,
+      { endpoint: "GET /api/projects/{id}/resources" },
+    );
   }
 
   async createProjectResource(
     projectId: string,
     data: CreateProjectResourceRequest,
   ): Promise<ProjectResource> {
-    return this.fetch(`/api/projects/${projectId}/resources`, {
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/resources`, {
       method: "POST",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ProjectResourceSchema, EMPTY_PROJECT_RESOURCE, {
+      endpoint: "POST /api/projects/{id}/resources",
     });
   }
 
@@ -2204,9 +2217,15 @@ export class ApiClient {
     resourceId: string,
     data: UpdateProjectResourceRequest,
   ): Promise<ProjectResource> {
-    return this.fetch(`/api/projects/${projectId}/resources/${resourceId}`, {
+    const raw = await this.fetch<unknown>(
+      `/api/projects/${projectId}/resources/${resourceId}`,
+      {
       method: "PUT",
       body: JSON.stringify(data),
+      },
+    );
+    return parseWithFallback(raw, ProjectResourceSchema, EMPTY_PROJECT_RESOURCE, {
+      endpoint: "PUT /api/projects/{id}/resources/{resourceId}",
     });
   }
 
@@ -2216,6 +2235,23 @@ export class ApiClient {
   ): Promise<void> {
     await this.fetch(`/api/projects/${projectId}/resources/${resourceId}`, {
       method: "DELETE",
+    });
+  }
+
+  async moveProjectResource(
+    projectId: string,
+    resourceId: string,
+    direction: "up" | "down",
+  ): Promise<ProjectResource> {
+    const raw = await this.fetch<unknown>(
+      `/api/projects/${projectId}/resources/${resourceId}/move`,
+      {
+        method: "POST",
+        body: JSON.stringify({ direction }),
+      },
+    );
+    return parseWithFallback(raw, ProjectResourceSchema, EMPTY_PROJECT_RESOURCE, {
+      endpoint: "POST /api/projects/{id}/resources/{resourceId}/move",
     });
   }
 

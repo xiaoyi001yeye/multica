@@ -83,8 +83,11 @@ func validateAndNormalizeResourceRef(resourceType string, ref json.RawMessage) (
 
 type githubRepoRef struct {
 	URL               string `json:"url"`
-	DefaultBranchHint string `json:"default_branch_hint,omitempty"`
 	Ref               string `json:"ref,omitempty"`
+	DefaultBranchHint string `json:"default_branch_hint,omitempty"`
+	Provider          string `json:"provider,omitempty"`
+	Role              string `json:"role,omitempty"`
+	PRCreationGuide   string `json:"pr_creation_guide,omitempty"`
 }
 
 func validateGithubRepoRef(ref json.RawMessage) (json.RawMessage, error) {
@@ -99,13 +102,64 @@ func validateGithubRepoRef(ref json.RawMessage) (json.RawMessage, error) {
 	if !isValidGitRepoURL(payload.URL) {
 		return nil, errors.New("github_repo: url must be a valid http(s) or ssh git URL")
 	}
-	payload.DefaultBranchHint = strings.TrimSpace(payload.DefaultBranchHint)
 	payload.Ref = strings.TrimSpace(payload.Ref)
+	payload.DefaultBranchHint = strings.TrimSpace(payload.DefaultBranchHint)
+	if strings.ContainsAny(payload.DefaultBranchHint, "\r\n") || len(payload.DefaultBranchHint) > 255 {
+		return nil, errors.New("github_repo: default_branch_hint must be a single line no longer than 255 characters")
+	}
+	payload.Provider = strings.ToLower(strings.TrimSpace(payload.Provider))
+	if payload.Provider == "" {
+		payload.Provider = inferGitProvider(payload.URL)
+	}
+	if !isOneOf(payload.Provider, "github", "gitlab", "self_hosted", "generic") {
+		return nil, errors.New("github_repo: provider must be github, gitlab, self_hosted, or generic")
+	}
+	payload.Role = strings.ToLower(strings.TrimSpace(payload.Role))
+	if payload.Role != "" && !isOneOf(payload.Role, "frontend", "backend", "docs", "infra", "other") {
+		return nil, errors.New("github_repo: role must be frontend, backend, docs, infra, or other")
+	}
+	payload.PRCreationGuide = strings.TrimSpace(payload.PRCreationGuide)
+	if len(payload.PRCreationGuide) > 4000 {
+		return nil, errors.New("github_repo: pr_creation_guide must be no longer than 4000 characters")
+	}
 	out, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+func isOneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func inferGitProvider(rawURL string) string {
+	host := ""
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Hostname() != "" {
+		host = parsed.Hostname()
+	} else {
+		beforePath := rawURL
+		if colon := strings.Index(beforePath, ":"); colon >= 0 {
+			beforePath = beforePath[:colon]
+		}
+		if at := strings.LastIndex(beforePath, "@"); at >= 0 {
+			beforePath = beforePath[at+1:]
+		}
+		host = beforePath
+	}
+	switch strings.ToLower(host) {
+	case "github.com":
+		return "github"
+	case "gitlab.com":
+		return "gitlab"
+	default:
+		return "self_hosted"
+	}
 }
 
 // localDirectoryRef is the JSONB shape stored for resource_type=local_directory.
@@ -132,6 +186,9 @@ func validateLocalDirectoryRef(ref json.RawMessage) (json.RawMessage, error) {
 	}
 	if !isAbsoluteLocalPath(payload.LocalPath) {
 		return nil, errors.New("local_directory: local_path must be an absolute path")
+	}
+	if isUnsafeLocalPath(payload.LocalPath) {
+		return nil, errors.New("local_directory: local_path must not be a system root or temporary directory")
 	}
 	payload.DaemonID = strings.TrimSpace(payload.DaemonID)
 	if payload.DaemonID == "" {
@@ -168,6 +225,19 @@ func isAbsoluteLocalPath(s string) bool {
 
 func isDriveLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func isUnsafeLocalPath(raw string) bool {
+	normalized := strings.TrimRight(strings.ReplaceAll(raw, `\`, "/"), "/")
+	if normalized == "" || (len(normalized) == 2 && isDriveLetter(normalized[0]) && normalized[1] == ':') {
+		return true
+	}
+	switch strings.ToLower(normalized) {
+	case "/", "/users", "/users/shared", "/home", "/root", "/etc", "/tmp", "/private/tmp", "/var", "/usr", "/opt":
+		return true
+	default:
+		return false
+	}
 }
 
 // isValidGitRepoURL accepts the three forms a user can paste from GitHub's
@@ -278,11 +348,43 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if conflict, err := h.findLocalDirectoryConflict(r.Context(), project.ID, req.ResourceType, normalizedRef, pgtype.UUID{}); err != nil {
+	if h.TxStarter == nil {
+		writeError(w, http.StatusInternalServerError, "database transaction support is unavailable")
+		return
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start resource creation")
+		return
+	}
+	defer tx.Rollback(r.Context()) // no-op after Commit
+
+	// Serialize resource creation per project. The semantic uniqueness rules
+	// below inspect JSON fields that the legacy full-JSON unique constraint
+	// cannot express, so a check-then-insert without this lock is racy.
+	if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtext($1))`, "project_resources:"+uuidToString(project.ID)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock project resources")
+		return
+	}
+	qtx := db.New(tx)
+	rows, err := qtx.ListProjectResources(r.Context(), project.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
+		return
+	}
+
+	if conflict, err := localDirectoryConflictInRows(rows, req.ResourceType, normalizedRef, pgtype.UUID{}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
 		return
 	} else if conflict {
 		writeError(w, http.StatusConflict, "this daemon already has a local_directory attached to the project; remove it before adding another")
+		return
+	}
+	if conflict, err := githubRepoURLConflictInRows(rows, req.ResourceType, normalizedRef); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
+		return
+	} else if conflict {
+		writeError(w, http.StatusConflict, "this Git repository is already attached to the project")
 		return
 	}
 
@@ -295,12 +397,11 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		position = *req.Position
 	} else {
 		// Append after existing resources.
-		count, _ := h.Queries.CountProjectResources(r.Context(), project.ID)
-		position = int32(count)
+		position = int32(len(rows))
 	}
 
 	creator, _ := h.parseUserUUIDOrZero(userID)
-	resource, err := h.Queries.CreateProjectResource(r.Context(), db.CreateProjectResourceParams{
+	resource, err := qtx.CreateProjectResource(r.Context(), db.CreateProjectResourceParams{
 		ProjectID:    project.ID,
 		WorkspaceID:  project.WorkspaceID,
 		ResourceType: req.ResourceType,
@@ -315,6 +416,10 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create project resource")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit project resource")
 		return
 	}
 
@@ -374,6 +479,10 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 	if rawRef, ok := raw["resource_ref"]; ok {
 		normalized, err := validateAndNormalizeResourceRef(existing.ResourceType, rawRef)
 		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validateResourceIdentityUnchanged(existing.ResourceType, existing.ResourceRef, normalized); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -440,6 +549,34 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func validateResourceIdentityUnchanged(resourceType string, current, next json.RawMessage) error {
+	switch resourceType {
+	case "github_repo":
+		var currentRef, nextRef githubRepoRef
+		if err := json.Unmarshal(current, &currentRef); err != nil {
+			return fmt.Errorf("github_repo: invalid existing resource_ref: %w", err)
+		}
+		if err := json.Unmarshal(next, &nextRef); err != nil {
+			return fmt.Errorf("github_repo: invalid resource_ref: %w", err)
+		}
+		if strings.TrimSpace(currentRef.URL) != nextRef.URL {
+			return errors.New("github_repo: url cannot be changed; remove the resource and add the new repository")
+		}
+	case "local_directory":
+		var currentRef, nextRef localDirectoryRef
+		if err := json.Unmarshal(current, &currentRef); err != nil {
+			return fmt.Errorf("local_directory: invalid existing resource_ref: %w", err)
+		}
+		if err := json.Unmarshal(next, &nextRef); err != nil {
+			return fmt.Errorf("local_directory: invalid resource_ref: %w", err)
+		}
+		if strings.TrimSpace(currentRef.DaemonID) != nextRef.DaemonID {
+			return errors.New("local_directory: daemon_id cannot be changed; remove the resource and add it on the target daemon")
+		}
+	}
+	return nil
+}
+
 // findLocalDirectoryConflict enforces "at most one local_directory resource
 // per (project, daemon)". The daemon picks the first matching daemon_id row
 // out of a task's resources (findLocalDirectoryAssignment), so letting a
@@ -454,15 +591,19 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 //
 // `excludeID` lets the update path ignore the row being edited.
 func (h *Handler) findLocalDirectoryConflict(ctx context.Context, projectID pgtype.UUID, resourceType string, normalizedRef json.RawMessage, excludeID pgtype.UUID) (bool, error) {
+	rows, err := h.Queries.ListProjectResources(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	return localDirectoryConflictInRows(rows, resourceType, normalizedRef, excludeID)
+}
+
+func localDirectoryConflictInRows(rows []db.ProjectResource, resourceType string, normalizedRef json.RawMessage, excludeID pgtype.UUID) (bool, error) {
 	if resourceType != "local_directory" {
 		return false, nil
 	}
 	var incoming localDirectoryRef
 	if err := json.Unmarshal(normalizedRef, &incoming); err != nil {
-		return false, err
-	}
-	rows, err := h.Queries.ListProjectResources(ctx, projectID)
-	if err != nil {
 		return false, err
 	}
 	for _, row := range rows {
@@ -485,6 +626,146 @@ func (h *Handler) findLocalDirectoryConflict(ctx context.Context, projectID pgty
 		}
 	}
 	return false, nil
+}
+
+func (h *Handler) findGithubRepoURLConflict(ctx context.Context, projectID pgtype.UUID, resourceType string, normalizedRef json.RawMessage) (bool, error) {
+	rows, err := h.Queries.ListProjectResources(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	return githubRepoURLConflictInRows(rows, resourceType, normalizedRef)
+}
+
+func githubRepoURLConflictInRows(rows []db.ProjectResource, resourceType string, normalizedRef json.RawMessage) (bool, error) {
+	if resourceType != "github_repo" {
+		return false, nil
+	}
+	var incoming githubRepoRef
+	if err := json.Unmarshal(normalizedRef, &incoming); err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if row.ResourceType != "github_repo" {
+			continue
+		}
+		var existing githubRepoRef
+		if err := json.Unmarshal(row.ResourceRef, &existing); err != nil {
+			continue
+		}
+		if strings.TrimSpace(existing.URL) == incoming.URL {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type moveProjectResourceRequest struct {
+	Direction string `json:"direction"`
+}
+
+// MoveProjectResource reorders one resource within its exact resource-type
+// group. Normalization and the adjacent swap happen in one transaction so a
+// client/network failure cannot leave half of a two-row swap persisted.
+func (h *Handler) MoveProjectResource(w http.ResponseWriter, r *http.Request) {
+	project, ok := h.loadProjectForResource(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	resourceID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "resourceId"), "resource id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var req moveProjectResourceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !isOneOf(req.Direction, "up", "down") {
+		writeError(w, http.StatusBadRequest, "direction must be up or down")
+		return
+	}
+	if h.TxStarter == nil {
+		writeError(w, http.StatusInternalServerError, "database transaction support is unavailable")
+		return
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start resource reorder")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtext($1))`, "project_resources:"+uuidToString(project.ID)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock project resources")
+		return
+	}
+	qtx := db.New(tx)
+	existing, err := qtx.GetProjectResourceInWorkspace(r.Context(), db.GetProjectResourceInWorkspaceParams{
+		ID: resourceID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil || uuidToString(existing.ProjectID) != uuidToString(project.ID) {
+		writeError(w, http.StatusNotFound, "project resource not found")
+		return
+	}
+	rows, err := qtx.ListProjectResources(r.Context(), project.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list project resources")
+		return
+	}
+	group := make([]db.ProjectResource, 0, len(rows))
+	currentIndex := -1
+	for _, row := range rows {
+		if row.ResourceType != existing.ResourceType {
+			continue
+		}
+		if uuidToString(row.ID) == uuidToString(existing.ID) {
+			currentIndex = len(group)
+		}
+		group = append(group, row)
+	}
+	targetIndex := currentIndex - 1
+	if req.Direction == "down" {
+		targetIndex = currentIndex + 1
+	}
+	if currentIndex < 0 || targetIndex < 0 || targetIndex >= len(group) {
+		if err := tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit resource reorder")
+			return
+		}
+		writeJSON(w, http.StatusOK, projectResourceToResponse(existing))
+		return
+	}
+
+	updatedRows := make([]db.ProjectResource, 0, len(group))
+	var moved db.ProjectResource
+	for index, row := range group {
+		position := int32(index)
+		if index == currentIndex {
+			position = int32(targetIndex)
+		} else if index == targetIndex {
+			position = int32(currentIndex)
+		}
+		updated, err := qtx.UpdateProjectResource(r.Context(), db.UpdateProjectResourceParams{
+			ID: row.ID, ResourceRef: row.ResourceRef, Label: row.Label, Position: position,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to reorder project resources")
+			return
+		}
+		updatedRows = append(updatedRows, updated)
+		if uuidToString(updated.ID) == uuidToString(existing.ID) {
+			moved = updated
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit resource reorder")
+		return
+	}
+	for _, updated := range updatedRows {
+		h.publish(protocol.EventProjectResourceUpdated, uuidToString(project.WorkspaceID), "member", userID, map[string]any{
+			"resource": projectResourceToResponse(updated), "project_id": uuidToString(project.ID),
+		})
+	}
+	writeJSON(w, http.StatusOK, projectResourceToResponse(moved))
 }
 
 // DeleteProjectResource removes a resource from a project.

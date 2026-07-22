@@ -160,10 +160,10 @@ func init() {
 
 	// project resource update — mirrors `add` flags, but every field is
 	// optional so the caller can edit one thing at a time.
-	projectResourceUpdateCmd.Flags().String("url", "", "Shortcut: new repo URL (github_repo)")
+	projectResourceUpdateCmd.Flags().String("url", "", "Repository URL is immutable; remove + add to change it")
 	projectResourceUpdateCmd.Flags().String("default-branch-hint", "", "Shortcut: new default branch hint (github_repo)")
 	projectResourceUpdateCmd.Flags().String("local-path", "", "Shortcut: new absolute local path (local_directory)")
-	projectResourceUpdateCmd.Flags().String("daemon-id", "", "Shortcut: new daemon id (local_directory)")
+	projectResourceUpdateCmd.Flags().String("daemon-id", "", "Daemon id is immutable; remove + add on another daemon")
 	projectResourceUpdateCmd.Flags().String("ref-label", "", "Shortcut: new label embedded in resource_ref (local_directory)")
 	projectResourceUpdateCmd.Flags().String("ref", "", "Generic JSON resource_ref payload, or a github_repo checkout ref")
 	projectResourceUpdateCmd.Flags().String("label", "", "New human-readable label; pass an empty string to clear")
@@ -550,7 +550,7 @@ func runProjectResourceList(cmd *cobra.Command, args []string) error {
 	}
 
 	fullID, _ := cmd.Flags().GetBool("full-id")
-	headers := []string{"ID", "TYPE", "REF", "LABEL"}
+	headers := []string{"ID", "TYPE", "LABEL", "DAEMON", "REF"}
 	rows := make([][]string, 0, len(resourcesRaw))
 	for _, raw := range resourcesRaw {
 		r, ok := raw.(map[string]any)
@@ -560,8 +560,9 @@ func runProjectResourceList(cmd *cobra.Command, args []string) error {
 		rows = append(rows, []string{
 			displayID(strVal(r, "id"), fullID),
 			strVal(r, "resource_type"),
-			summarizeResourceRef(r["resource_ref"]),
 			strVal(r, "label"),
+			resourceRefString(r["resource_ref"], "daemon_id"),
+			summarizeResourceRef(r["resource_ref"]),
 		})
 	}
 	cli.PrintTable(os.Stdout, headers, rows)
@@ -603,6 +604,9 @@ func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
 			if pathVal == "" || daemonVal == "" {
 				return fmt.Errorf("local_directory requires --local-path and --daemon-id (or pass a JSON payload via --ref)")
 			}
+			if !isCrossPlatformAbsolutePath(pathVal) {
+				return fmt.Errorf("local_directory --local-path must be an absolute path")
+			}
 			ref := map[string]any{"local_path": pathVal, "daemon_id": daemonVal}
 			if refLabel, _ := cmd.Flags().GetString("ref-label"); strings.TrimSpace(refLabel) != "" {
 				ref["label"] = strings.TrimSpace(refLabel)
@@ -637,10 +641,12 @@ func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
 
 	output, _ := cmd.Flags().GetString("output")
 	if output == "table" {
-		headers := []string{"ID", "TYPE", "REF"}
+		headers := []string{"ID", "TYPE", "LABEL", "DAEMON", "REF"}
 		rows := [][]string{{
 			strVal(result, "id"),
 			strVal(result, "resource_type"),
+			strVal(result, "label"),
+			resourceRefString(result["resource_ref"], "daemon_id"),
 			summarizeResourceRef(result["resource_ref"]),
 		}}
 		cli.PrintTable(os.Stdout, headers, rows)
@@ -724,7 +730,7 @@ func runProjectResourceUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(body) == 0 {
-		return fmt.Errorf("nothing to update — pass --ref / --url / --local-path / --label / --position / --clear-label")
+		return fmt.Errorf("nothing to update — pass --ref / --default-branch-hint / --local-path / --ref-label / --label / --position / --clear-label")
 	}
 
 	var result map[string]any
@@ -803,17 +809,17 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 		// Seed from the existing row so a `--default-branch-hint` edit doesn't
 		// clobber the `url` (server overwrites resource_ref wholesale).
 		if existingRef != nil {
-			if u, ok := existingRef["url"].(string); ok && strings.TrimSpace(u) != "" {
-				ref["url"] = strings.TrimSpace(u)
-			}
-			if h, ok := existingRef["default_branch_hint"].(string); ok && strings.TrimSpace(h) != "" {
-				ref["default_branch_hint"] = strings.TrimSpace(h)
+			for key, value := range existingRef {
+				ref[key] = value
 			}
 			if checkoutRef, ok := existingRef["ref"].(string); ok && strings.TrimSpace(checkoutRef) != "" {
 				ref["ref"] = strings.TrimSpace(checkoutRef)
 			}
 		}
 		if urlSet {
+			if existingRef != nil {
+				return nil, false, fmt.Errorf("github_repo URL cannot be changed; remove the resource and add the new repository")
+			}
 			urlVal, _ := cmd.Flags().GetString("url")
 			urlVal = strings.TrimSpace(urlVal)
 			if urlVal == "" {
@@ -850,14 +856,8 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 		}
 		ref := map[string]any{}
 		if existingRef != nil {
-			if p, ok := existingRef["local_path"].(string); ok && strings.TrimSpace(p) != "" {
-				ref["local_path"] = strings.TrimSpace(p)
-			}
-			if d, ok := existingRef["daemon_id"].(string); ok && strings.TrimSpace(d) != "" {
-				ref["daemon_id"] = strings.TrimSpace(d)
-			}
-			if l, ok := existingRef["label"].(string); ok && strings.TrimSpace(l) != "" {
-				ref["label"] = strings.TrimSpace(l)
+			for key, value := range existingRef {
+				ref[key] = value
 			}
 		}
 		if pathSet {
@@ -868,6 +868,9 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 			ref["local_path"] = pathVal
 		}
 		if daemonSet {
+			if existingRef != nil {
+				return nil, false, fmt.Errorf("local_directory daemon id cannot be changed; remove the resource and add it on the target daemon")
+			}
 			daemonVal := strings.TrimSpace(mustString(cmd, "daemon-id"))
 			if daemonVal == "" {
 				return nil, false, fmt.Errorf("--daemon-id cannot be empty")
@@ -946,12 +949,39 @@ func summarizeResourceRef(raw any) string {
 		return u
 	}
 	if p, ok := m["local_path"].(string); ok && p != "" {
-		return p
+		return summarizeLocalPath(p)
 	}
 	if data, err := json.Marshal(m); err == nil {
 		return string(data)
 	}
 	return ""
+}
+
+func resourceRefString(raw any, key string) string {
+	m, _ := raw.(map[string]any)
+	value, _ := m[key].(string)
+	return value
+}
+
+func summarizeLocalPath(raw string) string {
+	parts := strings.FieldsFunc(strings.TrimSpace(raw), func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return "…/" + strings.Join(parts[len(parts)-2:], "/")
+}
+
+func isCrossPlatformAbsolutePath(path string) bool {
+	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\\`) {
+		return true
+	}
+	return len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) &&
+		path[1] == ':' && (path[2] == '/' || path[2] == '\\')
 }
 
 // ---------------------------------------------------------------------------

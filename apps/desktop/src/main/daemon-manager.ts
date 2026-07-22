@@ -1078,6 +1078,38 @@ export function setupDaemonManager(
   ipcMain.handle("daemon:stop", () => withGuard(() => stopDaemon()));
   ipcMain.handle("daemon:restart", () => withGuard(() => restartDaemon()));
   ipcMain.handle("daemon:get-status", () => fetchHealth());
+  ipcMain.handle("daemon:check-repo", async (_event, url: string) => {
+    const health = await fetchHealth();
+    if (health.state !== "running") {
+      return { status: "daemon_offline" as const };
+    }
+    const active = await ensureActiveProfile();
+    try {
+      const response = await fetch(`http://127.0.0.1:${active.port}/repo/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (!response.ok) return { status: "network_failed" as const };
+      const data = (await response.json()) as Record<string, unknown>;
+      const status = data.status;
+      if (
+        status !== "accessible" &&
+        status !== "auth_required" &&
+        status !== "not_found" &&
+        status !== "network_failed"
+      ) {
+        return { status: "network_failed" as const };
+      }
+      return {
+        status,
+        checkedAt:
+          typeof data.checked_at === "string" ? data.checked_at : undefined,
+      };
+    } catch {
+      return { status: "daemon_offline" as const };
+    }
+  });
   // The host's OS name, available regardless of daemon state. The Runtimes
   // page uses it as a fallback identity for "this machine" when no
   // app-managed daemon is reporting a device name (e.g. the daemon runs

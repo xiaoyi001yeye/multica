@@ -64,12 +64,31 @@ export interface ListProjectsResponse {
 //   - github_repo: cloud-side git checkout, ref = { url, ref?, default_branch_hint? }
 //   - local_directory: in-place agent execution on a specific daemon,
 //     ref = { local_path, daemon_id, label? }
-export type ProjectResourceType = "github_repo" | "local_directory";
+export type KnownProjectResourceType = "github_repo" | "local_directory";
+// Keep response types forward-compatible with resource kinds introduced by a
+// newer backend. Mutation requests remain restricted to known kinds below.
+export type ProjectResourceType = string;
+
+export type GitRepositoryProvider =
+  | "github"
+  | "gitlab"
+  | "self_hosted"
+  | "generic";
+
+export type GitRepositoryRole =
+  | "frontend"
+  | "backend"
+  | "docs"
+  | "infra"
+  | "other";
 
 export interface GithubRepoResourceRef {
   url: string;
   ref?: string;
   default_branch_hint?: string;
+  provider?: GitRepositoryProvider;
+  role?: GitRepositoryRole;
+  pr_creation_guide?: string;
 }
 
 export interface LocalDirectoryResourceRef {
@@ -96,7 +115,7 @@ export interface ProjectResource {
 }
 
 export interface CreateProjectResourceRequest {
-  resource_type: ProjectResourceType;
+  resource_type: KnownProjectResourceType;
   resource_ref: ProjectResourceRef;
   label?: string;
   position?: number;

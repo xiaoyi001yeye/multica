@@ -1,7 +1,9 @@
 import { ipcMain, dialog, BrowserWindow } from "electron";
-import { access, stat } from "fs/promises";
+import { access, realpath, stat } from "fs/promises";
 import { constants as fsConstants } from "fs";
 import { basename, isAbsolute } from "path";
+import { homedir } from "os";
+import { isUnsafeLocalDirectoryPath } from "./local-directory-safety";
 
 export interface PickDirectoryResult {
   ok: boolean;
@@ -22,6 +24,7 @@ export interface ValidateLocalDirectoryResult {
     | "not_a_directory"
     | "not_readable"
     | "not_writable"
+    | "unsafe"
     | "error";
   error?: string;
 }
@@ -32,12 +35,23 @@ async function validateLocalDirectory(
   if (!path || !isAbsolute(path)) {
     return { ok: false, reason: "not_absolute" };
   }
+  if (isUnsafeLocalDirectoryPath(path, homedir())) {
+    return { ok: false, reason: "unsafe" };
+  }
   try {
     const st = await stat(path);
     if (!st.isDirectory()) return { ok: false, reason: "not_a_directory" };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return { ok: false, reason: "not_found" };
+    return { ok: false, reason: "error", error: errorMessage(err) };
+  }
+  try {
+    const resolved = await realpath(path);
+    if (isUnsafeLocalDirectoryPath(resolved, homedir())) {
+      return { ok: false, reason: "unsafe" };
+    }
+  } catch (err) {
     return { ok: false, reason: "error", error: errorMessage(err) };
   }
   try {

@@ -176,7 +176,12 @@ func TestPrepareWithProjectResources(t *testing.T) {
 			{
 				ID:           "33333333-4444-5555-6666-777777777777",
 				ResourceType: "github_repo",
-				ResourceRef:  json.RawMessage(`{"url":"https://github.com/multica-ai/multica","ref":"release/v2","default_branch_hint":"main"}`),
+				ResourceRef:  json.RawMessage(`{"url":"https://gitlab.com/multica-ai/multica","ref":"release/v2","default_branch_hint":"main","provider":"gitlab","role":"backend","pr_creation_guide":"Use glab mr create and include the issue key."}`),
+			},
+			{
+				ID:           "44444444-5555-6666-7777-888888888888",
+				ResourceType: "local_directory",
+				ResourceRef:  json.RawMessage(`{"local_path":"/Users/me/code/multica","daemon_id":"daemon-local","label":"Main checkout"}`),
 			},
 		},
 	}
@@ -221,7 +226,7 @@ func TestPrepareWithProjectResources(t *testing.T) {
 	if got.ProjectDescription != taskCtx.ProjectDescription {
 		t.Errorf("resources.json project_description = %q, want %q", got.ProjectDescription, taskCtx.ProjectDescription)
 	}
-	if len(got.Resources) != 1 || got.Resources[0].ResourceType != "github_repo" {
+	if len(got.Resources) != 2 || got.Resources[0].ResourceType != "github_repo" {
 		t.Fatalf("resources.json resources mismatch: %+v", got.Resources)
 	}
 
@@ -238,10 +243,17 @@ func TestPrepareWithProjectResources(t *testing.T) {
 		"## Project Context",
 		"Agent UX 2026",
 		"Always write copy in British English. Ship behind a feature flag.",
-		"GitHub repo",
-		"https://github.com/multica-ai/multica",
+		"Git repository",
+		"https://gitlab.com/multica-ai/multica",
+		"provider: `gitlab`",
 		"checkout ref: `release/v2`",
 		"default branch hint: `main`",
+		"role: `backend`",
+		"Use `multica repo checkout https://gitlab.com/multica-ai/multica --ref release/v2`",
+		"Use glab mr create and include the issue key.",
+		"Local directory",
+		"Main checkout",
+		"daemon-local",
 		".multica/project/resources.json",
 	} {
 		if !strings.Contains(s, want) {

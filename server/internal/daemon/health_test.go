@@ -178,6 +178,58 @@ func TestShutdownHandlerRejectsNonPost(t *testing.T) {
 	}
 }
 
+func TestClassifyRepoCheckFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{"credentials", "fatal: could not read Username for 'https://gitlab.com': terminal prompts disabled", "auth_required"},
+		{"ssh key", "git@gitlab.com: Permission denied (publickey).", "auth_required"},
+		{"missing", "remote: Repository not found.", "not_found"},
+		{"dns", "fatal: unable to access: Could not resolve host: gitlab.com", "network_failed"},
+		{"unknown", "fatal: the remote end hung up unexpectedly", "network_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyRepoCheckFailure(tc.output); got != tc.want {
+				t.Fatalf("classifyRepoCheckFailure(%q) = %q, want %q", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRepoCheckURLSafety(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		url  string
+		want bool
+	}{
+		{"https://github.com/acme/repo.git", true},
+		{"ssh://git@gitlab.com/acme/repo.git", true},
+		{"git@gitlab.com:acme/repo.git", true},
+		{"file:///etc/passwd", false},
+		{"/tmp/repo", false},
+		{"ext::sh -c id", false},
+		{"--upload-pack=touch", false},
+		{"https://github.com/", false},
+	} {
+		if got := isSafeRepoCheckURL(tc.url); got != tc.want {
+			t.Errorf("isSafeRepoCheckURL(%q) = %v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
+func TestRepoCheckOriginSafety(t *testing.T) {
+	t.Parallel()
+	if !isTrustedRepoCheckOrigin("") || !isTrustedRepoCheckOrigin("http://localhost:3000") {
+		t.Fatal("local callers should be accepted")
+	}
+	if isTrustedRepoCheckOrigin("https://attacker.example") {
+		t.Fatal("non-loopback browser origins must be rejected")
+	}
+}
+
 func TestHealthHandlerRespondsWhileTaskRepoLookupWaits(t *testing.T) {
 	const workspaceID = "ws-health"
 	const repoURL = "https://github.com/org/repo.git"

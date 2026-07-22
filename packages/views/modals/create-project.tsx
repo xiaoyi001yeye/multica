@@ -1,26 +1,7 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { CalendarClock, CalendarDays, ChevronRight, FolderOpen, Maximize2, Minimize2, MoreHorizontal, Search, X as XIcon, UserMinus } from "lucide-react";
-
-/**
- * GitHub mark — lucide-react v1 dropped brand icons, so we inline the
- * Octicon-style mark here (24×24 viewBox, currentColor fill so it inherits
- * the parent's text color). Stays in this file because there's only one
- * caller; promote to packages/ui if a second use crops up.
- */
-function GithubIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden="true"
-      className={className}
-    >
-      <path d="M12 .5C5.73.5.66 5.57.66 11.84c0 5.01 3.25 9.26 7.76 10.76.57.1.78-.25.78-.55 0-.27-.01-1.17-.02-2.13-3.16.69-3.83-1.34-3.83-1.34-.52-1.31-1.27-1.66-1.27-1.66-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.68 1.24 3.34.95.1-.74.4-1.24.72-1.53-2.52-.29-5.18-1.26-5.18-5.62 0-1.24.45-2.26 1.18-3.06-.12-.29-.51-1.45.11-3.02 0 0 .96-.31 3.15 1.17a10.93 10.93 0 0 1 5.74 0c2.19-1.48 3.15-1.17 3.15-1.17.62 1.57.23 2.73.11 3.02.74.8 1.18 1.82 1.18 3.06 0 4.37-2.67 5.32-5.21 5.61.41.35.78 1.04.78 2.1 0 1.52-.01 2.74-.01 3.11 0 .3.21.66.79.55 4.51-1.5 7.76-5.75 7.76-10.76C23.34 5.57 18.27.5 12 .5Z" />
-    </svg>
-  );
-}
+import { useMemo, useState, useRef } from "react";
+import { CalendarClock, CalendarDays, ChevronRight, FolderGit, FolderOpen, Maximize2, Minimize2, MoreHorizontal, Search, X as XIcon, UserMinus } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useCreateProject } from "@multica/core/projects/mutations";
 import { useProjectDraftStore } from "@multica/core/projects";
@@ -31,9 +12,10 @@ import {
 } from "@multica/core/projects/config";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
+import { runtimeListOptions } from "@multica/core/runtimes";
 import { memberListOptions, agentListOptions } from "@multica/core/workspace/queries";
 import { useActorName } from "@multica/core/workspace/hooks";
-import type { ProjectStatus, ProjectPriority } from "@multica/core/types";
+import type { AgentRuntime, ProjectStatus, ProjectPriority } from "@multica/core/types";
 import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@multica/ui/components/ui/dialog";
@@ -99,6 +81,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  const { data: runtimes = [] } = useQuery(runtimeListOptions(wsId));
   const { getActorName } = useActorName();
   const projectStatusLabels = useProjectStatusLabels();
   const projectPriorityLabels = useProjectPriorityLabels();
@@ -136,19 +119,27 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
     repo.url.toLowerCase().includes(repoQuery),
   );
 
-  // A project's source is binary: either a set of GitHub repos OR a local
-  // working directory — never both. Mode is the source of truth for what
-  // gets persisted on submit; switching mode does NOT clear the other
-  // side's stash, so toggling back and forth restores the user's prior
-  // selection. Only the mode-matching side is sent to the API. Local mode
-  // is hidden entirely on web (no daemon to bind the path to).
+  // The tabs only choose which resource form is visible. Both selections are
+  // retained and submitted: a matching local_directory is a daemon-specific
+  // worktree override, while github_repo rows remain the remote fallback.
   const desktop = isDesktopShell();
   const daemonStatus = useLocalDaemonStatus();
   const [sourceMode, setSourceMode] = useState<"repos" | "local">("repos");
   const [selectedLocalPath, setSelectedLocalPath] = useState<string | null>(null);
   const [selectedLocalLabel, setSelectedLocalLabel] = useState<string | null>(null);
+  const [selectedRuntimeDaemonId, setSelectedRuntimeDaemonId] = useState("");
   const [localPickError, setLocalPickError] = useState<string | null>(null);
   const [localPicking, setLocalPicking] = useState(false);
+  const localRuntimeChoices = useMemo(
+    () => projectLocalRuntimeChoices(runtimes),
+    [runtimes],
+  );
+  const selectedRuntime = localRuntimeChoices.find(
+    (runtime) => runtime.daemonId === selectedRuntimeDaemonId,
+  );
+  const selectedDaemonId = desktop
+    ? daemonStatus.daemonId
+    : selectedRuntimeDaemonId || null;
 
   const handleSourceModeChange = (mode: "repos" | "local") => {
     setSourceMode(mode);
@@ -217,32 +208,26 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
 
   const handleSubmit = async () => {
     if (!title.trim() || submitting) return;
-    // `sourceMode` decides which side's stash gets persisted — the other
-    // side is silently dropped, so repos picked then abandoned for local
-    // mode don't leak into the project.
-    let resources:
-      | Array<{ resource_type: "github_repo" | "local_directory"; resource_ref: Record<string, unknown> }>
-      | undefined;
-    if (sourceMode === "repos" && selectedRepos.length > 0) {
-      resources = selectedRepos.map((url) => ({
+    if (selectedLocalPath && !selectedDaemonId) {
+      setLocalPickError(t(($) => $.create_project.local_runtime_required));
+      return;
+    }
+    const resources: Array<{
+      resource_type: "github_repo" | "local_directory";
+      resource_ref: Record<string, unknown>;
+    }> = selectedRepos.map((url) => ({
         resource_type: "github_repo" as const,
         resource_ref: { url },
       }));
-    } else if (
-      sourceMode === "local" &&
-      selectedLocalPath &&
-      daemonStatus.daemonId
-    ) {
-      resources = [
-        {
-          resource_type: "local_directory" as const,
-          resource_ref: {
-            local_path: selectedLocalPath,
-            daemon_id: daemonStatus.daemonId,
-            ...(selectedLocalLabel ? { label: selectedLocalLabel } : {}),
-          },
+    if (selectedLocalPath && selectedDaemonId) {
+      resources.push({
+        resource_type: "local_directory",
+        resource_ref: {
+          local_path: selectedLocalPath,
+          daemon_id: selectedDaemonId,
+          ...(selectedLocalLabel ? { label: selectedLocalLabel } : {}),
         },
-      ];
+      });
     }
     setSubmitting(true);
     try {
@@ -257,7 +242,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
         start_date: startDate || undefined,
         due_date: dueDate || undefined,
         // Server attaches these in the same transaction as the project.
-        resources,
+        resources: resources.length > 0 ? resources : undefined,
       });
       clearDraft();
       onClose();
@@ -573,7 +558,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                     </>
                   ) : (
                     <>
-                      <GithubIcon className="size-3" />
+                      <FolderGit className="size-3" />
                       <span>
                         {selectedRepos.length === 0
                           ? t(($) => $.create_project.repos_pill)
@@ -585,12 +570,8 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
               }
             />
             <PopoverContent side="top" align="start" className="w-72 p-2 space-y-2">
-              {/* Source mode is binary — repo OR local directory, never both.
-                  Local option is desktop-only because a local_directory
-                  resource has to be pinned to a daemon_id, which doesn't
-                  exist on the web. */}
-              {desktop && (
-                <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/60 p-0.5">
+              {/* Tabs choose the form; both selected resource kinds are kept. */}
+              <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/60 p-0.5">
                   <button
                     type="button"
                     onClick={() => handleSourceModeChange("repos")}
@@ -615,8 +596,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                   >
                     {t(($) => $.create_project.source_tab_local)}
                   </button>
-                </div>
-              )}
+              </div>
 
               {sourceMode === "repos" ? (
                 <>
@@ -660,7 +640,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                                 readOnly
                                 className="size-3.5"
                               />
-                              <GithubIcon className="size-3.5" />
+                              <FolderGit className="size-3.5" />
                               <RepoUrlText url={repo.url} />
                             </button>
                           );
@@ -706,7 +686,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                           key={url}
                           className="flex items-center gap-2 text-xs"
                         >
-                          <GithubIcon className="size-3 text-muted-foreground" />
+                          <FolderGit className="size-3 text-muted-foreground" />
                           <RepoUrlText url={url} />
                           <button
                             type="button"
@@ -723,25 +703,40 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
               ) : (
                 <>
                   <div className="text-xs font-medium text-muted-foreground">
-                    {t(($) => $.create_project.local_heading)}
+                    {desktop
+                      ? t(($) => $.create_project.local_heading)
+                      : t(($) => $.create_project.local_heading_web)}
                   </div>
-                  {/* Daemon must be online — daemon_id is required to bind
-                      the resource. If it's offline, surface why and disable
-                      the picker; once it boots we re-render automatically
-                      via useLocalDaemonStatus. */}
-                  {daemonStatus.daemonId && daemonStatus.running ? (
-                    <p className="text-[11px] text-muted-foreground">
-                      {t(($) => $.create_project.local_on_device, {
-                        device: daemonStatus.deviceName ?? t(($) => $.create_project.local_this_machine),
-                      })}
-                    </p>
+                  {desktop ? (
+                    daemonStatus.daemonId && daemonStatus.running ? (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t(($) => $.create_project.local_on_device, {
+                          device: daemonStatus.deviceName ?? t(($) => $.create_project.local_this_machine),
+                        })}
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                        {t(($) => $.create_project.local_daemon_offline)}
+                      </p>
+                    )
                   ) : (
-                    <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                      {t(($) => $.create_project.local_daemon_offline)}
-                    </p>
+                    <select
+                      value={selectedRuntimeDaemonId}
+                      onChange={(event) => setSelectedRuntimeDaemonId(event.target.value)}
+                      className="h-8 w-full rounded-md border bg-background px-2 text-xs"
+                    >
+                      <option value="">{t(($) => $.create_project.local_select_runtime)}</option>
+                      {localRuntimeChoices.map((runtime) => (
+                        <option key={runtime.daemonId} value={runtime.daemonId}>
+                          {runtime.name} · {runtime.online
+                            ? t(($) => $.create_project.local_runtime_online)
+                            : t(($) => $.create_project.local_runtime_offline)}
+                        </option>
+                      ))}
+                    </select>
                   )}
 
-                  {selectedLocalPath ? (
+                  {desktop && selectedLocalPath ? (
                     <div className="rounded-md border px-2 py-2 space-y-1">
                       <div className="flex items-start gap-2 text-xs">
                         <FolderOpen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
@@ -773,7 +768,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                         {t(($) => $.create_project.local_change)}
                       </Button>
                     </div>
-                  ) : (
+                  ) : desktop ? (
                     <Button
                       type="button"
                       size="sm"
@@ -787,6 +782,28 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                         ? t(($) => $.create_project.local_picking)
                         : t(($) => $.create_project.local_pick)}
                     </Button>
+                  ) : (
+                    <input
+                      value={selectedLocalPath ?? ""}
+                      onChange={(event) => setSelectedLocalPath(event.target.value || null)}
+                      placeholder={t(($) => $.create_project.local_path_placeholder)}
+                      className="h-8 w-full rounded-md border bg-transparent px-2 font-mono text-[10px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    />
+                  )}
+
+                  {!desktop && (
+                    <input
+                      value={selectedLocalLabel ?? ""}
+                      onChange={(event) => setSelectedLocalLabel(event.target.value || null)}
+                      placeholder={t(($) => $.create_project.local_label_placeholder)}
+                      className="h-8 w-full rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    />
+                  )}
+
+                  {!desktop && selectedRuntime?.online === false && (
+                    <p className="text-[10px] text-muted-foreground">
+                      {t(($) => $.create_project.local_unverified_hint)}
+                    </p>
                   )}
 
                   {localPickError && (
@@ -846,4 +863,26 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
       </DialogContent>
     </Dialog>
   );
+}
+
+interface ProjectLocalRuntimeChoice {
+  daemonId: string;
+  name: string;
+  online: boolean;
+}
+
+function projectLocalRuntimeChoices(
+  runtimes: AgentRuntime[],
+): ProjectLocalRuntimeChoice[] {
+  const byDaemon = new Map<string, ProjectLocalRuntimeChoice>();
+  for (const runtime of runtimes) {
+    if (runtime.runtime_mode === "cloud" || !runtime.daemon_id) continue;
+    const current = byDaemon.get(runtime.daemon_id);
+    byDaemon.set(runtime.daemon_id, {
+      daemonId: runtime.daemon_id,
+      name: current?.name || runtime.name || runtime.daemon_id.slice(0, 8),
+      online: current?.online === true || runtime.status === "online",
+    });
+  }
+  return [...byDaemon.values()].toSorted((a, b) => a.name.localeCompare(b.name));
 }

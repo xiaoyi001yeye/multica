@@ -91,25 +91,16 @@ func TestBuildResourceRefFromFlagsGithubMergesHint(t *testing.T) {
 		}
 	})
 
-	t.Run("url override survives merge", func(t *testing.T) {
+	t.Run("url override is rejected for an existing resource", func(t *testing.T) {
 		cmd := newProjectResourceUpdateTestCmd()
 		_ = cmd.Flags().Set("url", "https://github.com/multica-ai/new-repo")
 		existing := map[string]any{
 			"url":                 "https://github.com/multica-ai/multica",
 			"default_branch_hint": "main",
 		}
-		ref, has, err := buildResourceRefFromFlags(cmd, "github_repo", existing)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !has {
-			t.Fatalf("expected has=true")
-		}
-		if ref["url"] != "https://github.com/multica-ai/new-repo" {
-			t.Errorf("expected overridden url, got %v", ref["url"])
-		}
-		if ref["default_branch_hint"] != "main" {
-			t.Errorf("expected merged hint to persist, got %v", ref["default_branch_hint"])
+		_, _, err := buildResourceRefFromFlags(cmd, "github_repo", existing)
+		if err == nil || !strings.Contains(err.Error(), "cannot be changed") {
+			t.Fatalf("expected immutable URL error, got %v", err)
 		}
 	})
 

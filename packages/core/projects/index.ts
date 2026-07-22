@@ -18,4 +18,10 @@ export {
   useCreateProjectResource,
   useUpdateProjectResource,
   useDeleteProjectResource,
+  useMoveProjectResource,
 } from "./resource-queries";
+export {
+  gitProviderFromUrl,
+  localPathSummary,
+  resourcePositionSwap,
+} from "./resources";

@@ -7,6 +7,7 @@ import type {
   ProjectResource,
   UpdateProjectResourceRequest,
 } from "../types";
+import { resourcePositionSwap } from "./resources";
 
 export const projectResourceKeys = {
   list: (wsId: string, projectId: string) =>
@@ -115,6 +116,58 @@ export function useDeleteProjectResource(wsId: string, projectId: string) {
       qc.invalidateQueries({
         queryKey: projectResourceKeys.list(wsId, projectId),
       });
+    },
+  });
+}
+
+export function useMoveProjectResource(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  const queryKey = projectResourceKeys.list(wsId, projectId);
+  return useMutation({
+    mutationFn: async ({
+      resourceId,
+      direction,
+    }: {
+      resourceId: string;
+      direction: "up" | "down";
+    }) => {
+      const current = qc.getQueryData<ListProjectResourcesResponse>(queryKey);
+      const updates = resourcePositionSwap(
+        current?.resources ?? [],
+        resourceId,
+        direction,
+      );
+      if (current && updates.length > 0) {
+        const positions = new Map(
+          updates.map((update) => [update.resourceId, update.position]),
+        );
+        qc.setQueryData<ListProjectResourcesResponse>(queryKey, {
+          ...current,
+          resources: current.resources
+            .map((resource) => ({
+              ...resource,
+              position: positions.get(resource.id) ?? resource.position,
+            }))
+            .toSorted(
+              (a, b) =>
+                a.position - b.position ||
+                a.created_at.localeCompare(b.created_at),
+            ),
+        });
+      }
+
+      try {
+        if (updates.length > 0) {
+          await api.moveProjectResource(projectId, resourceId, direction);
+        }
+        return updates;
+      } catch (error) {
+        if (current) qc.setQueryData(queryKey, current);
+        throw error;
+      }
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey });
     },
   });
 }

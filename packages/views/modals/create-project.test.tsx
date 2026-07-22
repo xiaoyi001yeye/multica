@@ -8,13 +8,59 @@ const longRepoUrl =
   "https://github.com/multica-ai/a-very-long-repository-name-that-needs-a-tooltip";
 const apiRepoUrl = "https://github.com/multica-ai/api";
 const webRepoUrl = "https://github.com/multica-ai/web";
+const createProjectMutate = vi.hoisted(() =>
+  vi.fn(async () => ({ id: "project-1" })),
+);
+
+const localRuntimes = [
+  {
+    id: "runtime-local",
+    workspace_id: "workspace-1",
+    daemon_id: "daemon-local",
+    name: "Build machine",
+    runtime_mode: "local",
+    provider: "codex",
+    launch_header: "",
+    status: "offline",
+    device_info: "",
+    metadata: {},
+    owner_id: null,
+    visibility: "private",
+    last_seen_at: null,
+    created_at: "2026-07-22T00:00:00Z",
+    updated_at: "2026-07-22T00:00:00Z",
+  },
+  {
+    id: "runtime-cloud",
+    workspace_id: "workspace-1",
+    daemon_id: "daemon-cloud",
+    name: "Cloud machine",
+    runtime_mode: "cloud",
+    provider: "codex",
+    launch_header: "",
+    status: "online",
+    device_info: "",
+    metadata: {},
+    owner_id: null,
+    visibility: "private",
+    last_seen_at: null,
+    created_at: "2026-07-22T00:00:00Z",
+    updated_at: "2026-07-22T00:00:00Z",
+  },
+];
 
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({ data: [] }),
+  useQuery: (options: { queryKey?: readonly unknown[] }) => ({
+    data: options.queryKey?.[0] === "runtimes" ? localRuntimes : [],
+  }),
 }));
 
 vi.mock("@multica/core/projects/mutations", () => ({
-  useCreateProject: () => ({ mutateAsync: vi.fn() }),
+  useCreateProject: () => ({ mutateAsync: createProjectMutate }),
+}));
+
+vi.mock("@multica/core/runtimes", () => ({
+  runtimeListOptions: () => ({ queryKey: ["runtimes"] }),
 }));
 
 vi.mock("@multica/core/projects", () => ({
@@ -64,8 +110,11 @@ vi.mock("../navigation", () => ({
 }));
 
 vi.mock("../editor", () => {
-  const ContentEditor = React.forwardRef<HTMLTextAreaElement, { placeholder?: string }>(
-    ({ placeholder }, ref) => <textarea ref={ref} placeholder={placeholder} />,
+  const ContentEditor = React.forwardRef<{ getMarkdown: () => string }, { placeholder?: string }>(
+    ({ placeholder }, ref) => {
+      React.useImperativeHandle(ref, () => ({ getMarkdown: () => "" }));
+      return <textarea placeholder={placeholder} />;
+    },
   );
   ContentEditor.displayName = "ContentEditor";
 
@@ -221,5 +270,44 @@ describe("CreateProjectModal", () => {
     await user.type(repoSearchInput, "no-match");
 
     expect(screen.getByText("No repositories match your search.")).toBeInTheDocument();
+  });
+
+  it("lets web create a project with an offline local runtime path", async () => {
+    const user = userEvent.setup();
+    createProjectMutate.mockClear();
+    renderWithI18n(<CreateProjectModal onClose={vi.fn()} />);
+
+    const localTabs = screen.getAllByRole("button", { name: "Local directory" });
+    await user.click(localTabs.at(-1)!);
+    await user.selectOptions(
+      screen.getByRole("combobox"),
+      "daemon-local",
+    );
+    await user.type(
+      screen.getByPlaceholderText("/absolute/path/to/project"),
+      "/srv/checkout",
+    );
+    await user.type(
+      screen.getByPlaceholderText("Directory label (optional)"),
+      "Checkout",
+    );
+    await user.type(screen.getByPlaceholderText("Project title"), "Local project");
+    await user.click(screen.getByRole("button", { name: "Create Project" }));
+
+    expect(createProjectMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resources: [
+          {
+            resource_type: "local_directory",
+            resource_ref: {
+              local_path: "/srv/checkout",
+              daemon_id: "daemon-local",
+              label: "Checkout",
+            },
+          },
+        ],
+      }),
+    );
+    expect(screen.queryByRole("option", { name: /Cloud machine/ })).not.toBeInTheDocument();
   });
 });

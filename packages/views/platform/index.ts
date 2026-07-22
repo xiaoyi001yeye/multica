@@ -6,8 +6,11 @@ export {
   isDesktopShell,
   pickDirectory,
   validateLocalDirectory,
+  checkRepositoryAccess,
   type PickDirectoryResult,
   type ValidateLocalDirectoryResult,
+  type RepositoryAccessCheckResult,
+  type RepositoryAccessStatus,
 } from "./local-directory";
 export {
   useLocalDaemonStatus,
