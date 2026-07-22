@@ -57,9 +57,25 @@ export interface ListProjectsResponse {
 //     ref = { local_path, daemon_id, label? }
 export type ProjectResourceType = "github_repo" | "local_directory";
 
+export type GitRepositoryProvider =
+  | "github"
+  | "gitlab"
+  | "self_hosted"
+  | "generic";
+
+export type GitRepositoryRole =
+  | "frontend"
+  | "backend"
+  | "docs"
+  | "infra"
+  | "other";
+
 export interface GithubRepoResourceRef {
   url: string;
   default_branch_hint?: string;
+  provider?: GitRepositoryProvider;
+  role?: GitRepositoryRole;
+  pr_creation_guide?: string;
 }
 
 export interface LocalDirectoryResourceRef {

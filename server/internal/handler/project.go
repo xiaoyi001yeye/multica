@@ -274,6 +274,7 @@ func (h *Handler) CreateProject(w http.ResponseWriter, r *http.Request) {
 	// surface, where there is no existing row to compare against yet.
 	normalizedRefs := make([]json.RawMessage, len(req.Resources))
 	localDirSeen := map[string]int{}
+	githubRepoSeen := map[string]int{}
 	for i, res := range req.Resources {
 		res.ResourceType = strings.TrimSpace(res.ResourceType)
 		if res.ResourceType == "" {
@@ -297,6 +298,17 @@ func (h *Handler) CreateProject(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			localDirSeen[ld.DaemonID] = i
+		} else if res.ResourceType == "github_repo" {
+			var repo githubRepoRef
+			if err := json.Unmarshal(ref, &repo); err != nil {
+				writeError(w, http.StatusBadRequest, "resources["+strconv.Itoa(i)+"]: "+err.Error())
+				return
+			}
+			if prev, ok := githubRepoSeen[repo.URL]; ok {
+				writeError(w, http.StatusBadRequest, "resources["+strconv.Itoa(i)+"]: duplicate Git repository URL (already at index "+strconv.Itoa(prev)+")")
+				return
+			}
+			githubRepoSeen[repo.URL] = i
 		}
 	}
 

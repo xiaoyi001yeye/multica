@@ -20,16 +20,33 @@ export type ValidateLocalDirectoryResult = {
     | "not_a_directory"
     | "not_readable"
     | "not_writable"
+    | "unsafe"
     | "error"
     | "unsupported";
   error?: string;
 };
+
+export type RepositoryAccessStatus =
+  | "accessible"
+  | "auth_required"
+  | "not_found"
+  | "network_failed"
+  | "not_checked"
+  | "daemon_offline";
+
+export interface RepositoryAccessCheckResult {
+  status: RepositoryAccessStatus;
+  checkedAt?: string;
+}
 
 interface DesktopLocalDirectoryAPI {
   pickDirectory?: (defaultPath?: string) => Promise<PickDirectoryResult>;
   validateLocalDirectory?: (
     path: string,
   ) => Promise<ValidateLocalDirectoryResult>;
+  checkRepositoryAccess?: (
+    url: string,
+  ) => Promise<RepositoryAccessCheckResult>;
 }
 
 function readDesktopAPI(): DesktopLocalDirectoryAPI | undefined {
@@ -61,4 +78,12 @@ export async function validateLocalDirectory(
   const api = readDesktopAPI();
   if (!api?.validateLocalDirectory) return { ok: false, reason: "unsupported" };
   return api.validateLocalDirectory(path);
+}
+
+export async function checkRepositoryAccess(
+  url: string,
+): Promise<RepositoryAccessCheckResult> {
+  const api = readDesktopAPI();
+  if (!api?.checkRepositoryAccess) return { status: "not_checked" };
+  return api.checkRepositoryAccess(url);
 }

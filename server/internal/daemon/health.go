@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -59,6 +61,76 @@ type repoCheckoutRequest struct {
 	Ref         string `json:"ref,omitempty"`
 	AgentName   string `json:"agent_name"`
 	TaskID      string `json:"task_id"`
+}
+
+type repoCheckRequest struct {
+	URL string `json:"url"`
+}
+
+type repoCheckResponse struct {
+	Status    string `json:"status"`
+	CheckedAt string `json:"checked_at"`
+}
+
+func (d *Daemon) repoCheckHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req repoCheckRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		req.URL = strings.TrimSpace(req.URL)
+		if req.URL == "" {
+			http.Error(w, "url is required", http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", req.URL)
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		output, err := cmd.CombinedOutput()
+		status := "accessible"
+		if err != nil {
+			status = classifyRepoCheckFailure(string(output))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(repoCheckResponse{
+			Status:    status,
+			CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+}
+
+func classifyRepoCheckFailure(output string) string {
+	lower := strings.ToLower(output)
+	for _, marker := range []string{
+		"authentication failed",
+		"could not read username",
+		"permission denied (publickey)",
+		"terminal prompts disabled",
+		"access denied",
+	} {
+		if strings.Contains(lower, marker) {
+			return "auth_required"
+		}
+	}
+	for _, marker := range []string{
+		"repository not found",
+		"project not found",
+		"does not appear to be a git repository",
+		"does not exist",
+	} {
+		if strings.Contains(lower, marker) {
+			return "not_found"
+		}
+	}
+	return "network_failed"
 }
 
 // healthHandler returns the /health HTTP handler. Extracted from serveHealth
@@ -138,6 +210,7 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", d.healthHandler(startedAt))
 	mux.HandleFunc("/shutdown", d.shutdownHandler())
+	mux.HandleFunc("/repo/check", d.repoCheckHandler())
 
 	mux.HandleFunc("/repo/checkout", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

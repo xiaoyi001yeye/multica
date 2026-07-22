@@ -177,6 +177,27 @@ func TestShutdownHandlerRejectsNonPost(t *testing.T) {
 	}
 }
 
+func TestClassifyRepoCheckFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{"credentials", "fatal: could not read Username for 'https://gitlab.com': terminal prompts disabled", "auth_required"},
+		{"ssh key", "git@gitlab.com: Permission denied (publickey).", "auth_required"},
+		{"missing", "remote: Repository not found.", "not_found"},
+		{"dns", "fatal: unable to access: Could not resolve host: gitlab.com", "network_failed"},
+		{"unknown", "fatal: the remote end hung up unexpectedly", "network_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyRepoCheckFailure(tc.output); got != tc.want {
+				t.Fatalf("classifyRepoCheckFailure(%q) = %q, want %q", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHealthHandlerRespondsWhileTaskRepoLookupWaits(t *testing.T) {
 	const workspaceID = "ws-health"
 	const repoURL = "https://github.com/org/repo.git"

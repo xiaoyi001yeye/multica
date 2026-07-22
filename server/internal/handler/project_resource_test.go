@@ -32,7 +32,10 @@ func TestProjectResourceLifecycle(t *testing.T) {
 	w = httptest.NewRecorder()
 	req = newRequest("POST", "/api/projects/"+project.ID+"/resources", map[string]any{
 		"resource_type": "github_repo",
-		"resource_ref":  map[string]any{"url": "https://github.com/multica-ai/multica"},
+		"resource_ref": map[string]any{
+			"url":  "https://github.com/multica-ai/multica",
+			"role": "backend",
+		},
 	})
 	req = withURLParam(req, "id", project.ID)
 	testHandler.CreateProjectResource(w, req)
@@ -229,6 +232,53 @@ func TestIsValidGitRepoURL(t *testing.T) {
 		if isValidGitRepoURL(s) {
 			t.Errorf("isValidGitRepoURL(%q) = true, want false", s)
 		}
+	}
+}
+
+func TestValidateGithubRepoRefMetadata(t *testing.T) {
+	got, err := validateGithubRepoRef(json.RawMessage(`{
+		"url":"  git@gitlab.example.com:group/repo.git  ",
+		"default_branch_hint":" develop ",
+		"provider":" gitlab ",
+		"role":" backend ",
+		"pr_creation_guide":" Create an MR with the issue key. "
+	}`))
+	if err != nil {
+		t.Fatalf("validateGithubRepoRef: %v", err)
+	}
+	var ref githubRepoRef
+	if err := json.Unmarshal(got, &ref); err != nil {
+		t.Fatalf("decode normalized ref: %v", err)
+	}
+	if ref.URL != "git@gitlab.example.com:group/repo.git" {
+		t.Errorf("URL = %q", ref.URL)
+	}
+	if ref.DefaultBranchHint != "develop" {
+		t.Errorf("DefaultBranchHint = %q", ref.DefaultBranchHint)
+	}
+	if ref.Provider != "gitlab" {
+		t.Errorf("Provider = %q", ref.Provider)
+	}
+	if ref.Role != "backend" {
+		t.Errorf("Role = %q", ref.Role)
+	}
+	if ref.PRCreationGuide != "Create an MR with the issue key." {
+		t.Errorf("PRCreationGuide = %q", ref.PRCreationGuide)
+	}
+
+	for _, tc := range []struct {
+		name string
+		ref  string
+	}{
+		{"unknown provider", `{"url":"https://example.com/a/b.git","provider":"bitbucket"}`},
+		{"unknown role", `{"url":"https://example.com/a/b.git","role":"database"}`},
+		{"multiline branch", `{"url":"https://example.com/a/b.git","default_branch_hint":"main\nignore"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := validateGithubRepoRef(json.RawMessage(tc.ref)); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 
@@ -755,12 +805,12 @@ func TestProjectResourceUpdateLifecycle(t *testing.T) {
 		t.Errorf("label-only update leaked into resource_ref: %+v", ref)
 	}
 
-	// Update the ref payload (move to a new daemon path) and bump position.
+	// Update the ref payload (reselect a path on the same daemon) and bump position.
 	w = httptest.NewRecorder()
 	req = newRequest("PUT", "/api/projects/"+project.ID+"/resources/"+created.ID, map[string]any{
 		"resource_ref": map[string]any{
 			"local_path": "/Users/foo/work/b",
-			"daemon_id":  "d2",
+			"daemon_id":  "d1",
 			"label":      "B",
 		},
 		"position": 5,
@@ -776,7 +826,7 @@ func TestProjectResourceUpdateLifecycle(t *testing.T) {
 	if err := json.Unmarshal(updated.ResourceRef, &ref); err != nil {
 		t.Fatalf("decode resource_ref: %v", err)
 	}
-	if ref.LocalPath != "/Users/foo/work/b" || ref.DaemonID != "d2" || ref.Label != "B" {
+	if ref.LocalPath != "/Users/foo/work/b" || ref.DaemonID != "d1" || ref.Label != "B" {
 		t.Errorf("ref-update mismatch: %+v", ref)
 	}
 	if updated.Position != 5 {
@@ -784,6 +834,23 @@ func TestProjectResourceUpdateLifecycle(t *testing.T) {
 	}
 	if updated.Label == nil || *updated.Label != "renamed" {
 		t.Errorf("label should survive ref edit, got %v", updated.Label)
+	}
+
+	// daemon_id is the local resource identity. Moving a row to another
+	// machine must be expressed as remove + add so the resource ID never
+	// changes meaning.
+	w = httptest.NewRecorder()
+	req = newRequest("PUT", "/api/projects/"+project.ID+"/resources/"+created.ID, map[string]any{
+		"resource_ref": map[string]any{
+			"local_path": "/Users/foo/work/b",
+			"daemon_id":  "d2",
+			"label":      "B",
+		},
+	})
+	req = withURLParams(req, "id", project.ID, "resourceId", created.ID)
+	testHandler.UpdateProjectResource(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("daemon identity update: expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// Explicit null clears the outer label.
@@ -933,8 +1000,9 @@ func TestProjectResourceLocalDirectoryDaemonScopedConflict(t *testing.T) {
 		t.Fatalf("decode other-daemon row: %v", err)
 	}
 
-	// An UPDATE that drives the other-daemon row onto the first daemon must
-	// also 409 — the first daemon already has a registration.
+	// daemon_id is immutable. Moving the other-daemon row onto the first
+	// daemon must be remove + add, so the update is rejected before conflict
+	// detection.
 	w = httptest.NewRecorder()
 	req = newRequest("PUT", "/api/projects/"+project.ID+"/resources/"+second.ID, map[string]any{
 		"resource_ref": map[string]any{
@@ -945,8 +1013,8 @@ func TestProjectResourceLocalDirectoryDaemonScopedConflict(t *testing.T) {
 	})
 	req = withURLParams(req, "id", project.ID, "resourceId", second.ID)
 	testHandler.UpdateProjectResource(w, req)
-	if w.Code != http.StatusConflict {
-		t.Errorf("update onto existing daemon: expected 409, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("update onto existing daemon: expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// Editing the same row in place (different label, same target) must

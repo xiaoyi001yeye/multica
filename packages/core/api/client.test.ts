@@ -6,6 +6,35 @@ afterEach(() => {
 });
 
 describe("ApiClient", () => {
+  it("falls back when project resource responses are malformed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            resources: [
+              {
+                id: "resource-1",
+                project_id: "project-1",
+                workspace_id: "workspace-1",
+                resource_type: "github_repo",
+                resource_ref: { url: null },
+              },
+            ],
+            total: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    const client = new ApiClient("https://api.example.test");
+    await expect(client.listProjectResources("project-1")).resolves.toEqual({
+      resources: [],
+      total: 0,
+    });
+  });
+
   it("preserves HTTP status on failed requests", async () => {
     vi.stubGlobal(
       "fetch",

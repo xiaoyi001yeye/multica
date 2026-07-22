@@ -68,8 +68,19 @@ interface DesktopAPI {
       | "not_a_directory"
       | "not_readable"
       | "not_writable"
+      | "unsafe"
       | "error";
     error?: string;
+  }>;
+  /** Check Git access using the active local daemon's credentials. */
+  checkRepositoryAccess: (url: string) => Promise<{
+    status:
+      | "accessible"
+      | "auth_required"
+      | "not_found"
+      | "network_failed"
+      | "daemon_offline";
+    checkedAt?: string;
   }>;
 }
 

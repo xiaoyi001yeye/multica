@@ -1,11 +1,11 @@
 ---
 title: Project Resources
-description: Attach typed pointers (Git repos, local directories, more later) to a project so agents can pick them up as scoped context.
+description: Attach Git repositories and local directories to a project so agents can pick them up as scoped context.
 ---
 
-A **Project Resource** is a typed pointer — a Git repo URL, a path on your own machine, a Notion page tomorrow — attached to a [project](/workspaces). When an [agent](/agents) runs against an issue inside that project, the daemon automatically writes the project's resource list into the agent's working directory and into its [meta-skill](/skills) prompt.
+A **Project Resource** is a Git repository or a path on one of your machines attached to a [project](/workspaces). When an [agent](/agents) runs against an issue inside that project, the daemon automatically writes the project's ordered resource list into the agent's working directory and into its [meta-skill](/skills) prompt.
 
-The result: the agent knows which repo to check out (or which local directory to work in), and which docs are the "primary references" for this project, without anyone copy-pasting context into the issue body.
+The result: the agent knows which repository to check out or which local directory to work in, without anyone copy-pasting context into the issue body.
 
 ## Mental model
 
@@ -13,9 +13,7 @@ A project is no longer just a label. It is a small **resource container**:
 
 - A project has 0..N **resources**.
 - A resource has a `resource_type` (e.g. `github_repo`, `local_directory`) and a `resource_ref` (a JSON payload typed by `resource_type`).
-- New resource types add a string + a handler. **No schema migration. No frontend rewrite.**
-
-This shape is intentional — it's the same pattern Multica already uses for agent providers: a `type` discriminator and a typed payload. It keeps the schema stable so adding "Notion page", "Google Doc", "uploaded file", or "external URL" later is a small, additive change.
+- The supported resource types are `github_repo` and `local_directory`.
 
 Today two resource types ship: [`github_repo`](#resource-type-github_repo) (clone-per-task into an isolated worktree) and [`local_directory`](#resource-type-local_directory) (run directly inside a folder on a specific daemon's machine).
 
@@ -28,12 +26,15 @@ The default resource type — checked out per task into an isolated worktree:
   "resource_type": "github_repo",
   "resource_ref": {
     "url": "https://github.com/owner/repo",
-    "default_branch_hint": "main"
+    "default_branch_hint": "main",
+    "provider": "github",
+    "role": "backend",
+    "pr_creation_guide": "Create a branch from main and include the issue key in the PR title."
   }
 }
 ```
 
-`default_branch_hint` is optional — if present, the daemon surfaces it in the meta-skill so the agent knows which branch to base its work on.
+Despite the internal type name, repository URLs may point to GitHub, GitLab, self-hosted Git, or another Git server. The default branch, role, description, and PR/MR guide are optional execution hints surfaced to the agent.
 
 ## Resource type: `local_directory`
 
@@ -71,13 +72,13 @@ The trade-off you accept in both cases is the same: **this version ships no file
 
 ### Attaching a local directory
 
-The folder picker lives in the **Desktop app** only — the web app has no way to read OS paths, so the "Add local directory" button is hidden there. On Desktop:
+On **Desktop**, attach a directory from the native folder picker:
 
 1. Open the project → **Resources** panel.
 2. Click **Add local directory**. A native folder picker opens.
 3. Pick the folder. The path is bound to **the daemon currently registered by this Desktop install** — the resource record stores both the path and that daemon's ID.
 
-On Desktop the button stays visible but is **disabled with a hint** when the daemon on this machine is offline, or when the project already has a `local_directory` bound to this daemon — so you can see *why* it's unavailable. (On the web app the button is hidden outright, since there's no folder picker available there at all.) To bind another machine's directory, install Desktop on that machine and add the resource from there.
+On the **Web app**, select a local runtime or machine and enter its absolute path manually. Cloud runtimes are excluded. An offline local runtime may still be selected; the path is shown as unverified and is checked when a task starts. A project may have only one local directory per daemon.
 
 From the CLI (works on web-only environments too, as long as you supply the daemon ID yourself):
 
@@ -153,7 +154,7 @@ These are tracked as the agent-task-lifecycle follow-up to the local-directory w
 
 ## Attaching repos at project creation
 
-In the **Web** or **Desktop** app, opening *New project* now shows a **Repos** pill alongside Status / Priority / Lead. Selecting workspace-bound repos (or pasting an ad-hoc URL) attaches them as `github_repo` resources the moment the project is created.
+In the **Web** or **Desktop** app, opening *New project* shows a **Repos** pill alongside Status / Priority / Lead. Selecting workspace-bound repositories (or pasting an ad-hoc Git URL) attaches them as `github_repo` resources when the project is created. The same picker can attach one local directory; remote repositories remain the fallback on other machines.
 
 From the **CLI**:
 
@@ -170,11 +171,8 @@ multica project resource list <project-id>
 multica project resource add  <project-id> --type github_repo --url <url>
 multica project resource remove <project-id> <resource-id>
 
-# Generic escape hatch for any resource_type the server understands —
-# no CLI change needed when a new type ships:
-multica project resource add <project-id> \
-  --type notion_page \
-  --ref '{"page_id":"…","title":"…"}'
+# Update editable metadata or remove and re-add an immutable repository URL.
+multica project resource update <project-id> <resource-id> --default-branch-hint develop
 ```
 
 `--repo` may be repeated; each value is attached as a separate `github_repo` resource.
@@ -217,7 +215,11 @@ This issue belongs to **Agent UX 2026**.
 
 Project resources (also written to `.multica/project/resources.json`):
 
-- **GitHub repo**: https://github.com/multica-ai/multica (default branch: `main`)
+- **Git repository**: https://github.com/multica-ai/multica
+  - Provider: GitHub
+  - Role: backend
+  - Default branch: `main`
+  - Checkout: `multica repo checkout https://github.com/multica-ai/multica --ref main`
 
 Resources are pointers — open them only when relevant to the task. For
 `github_repo` resources, use `multica repo checkout <url>` to fetch the code.
@@ -228,19 +230,6 @@ The text is intentionally minimal. The full payload is on disk; the prompt only 
 ### Failure mode
 
 Resource fetch is **best-effort**. If the API call fails, the project section is omitted from the prompt and the file is not written, but the task still starts. Agents never block on missing project context.
-
-## Adding a new resource type
-
-The whole point of the abstraction is that new types are cheap. The full path:
-
-1. **Server validator** (`server/internal/handler/project_resource.go`) — add a case in `validateAndNormalizeResourceRef` that parses and normalizes the new payload.
-2. **Daemon meta-skill formatter** (`server/internal/daemon/execenv/runtime_config.go`) — add a case in `formatProjectResource` so the agent prompt renders the new type as a readable bullet.
-3. **TypeScript types** (`packages/core/types/project.ts`) — extend `ProjectResourceType` and add the payload interface.
-4. **UI renderer** (`packages/views/projects/components/project-resources-section.tsx`) — add a case in `ResourceRow` for the new type.
-
-There is **no schema migration**, no new sqlc query, no new endpoint, **and no CLI change** — the CLI's generic `--ref '<json>'` flag accepts any payload the validator understands, so day-one support for a new type is purely the four steps above. (You may *optionally* add a per-type CLI shortcut later; not required.)
-
-The same `project_resource` table and the same three CRUD calls handle every type.
 
 ## Workspace repos vs. project repos
 
@@ -257,6 +246,6 @@ The daemon mirrors this on the checkout side: when a task arrives with project-s
 
 - **Cross-project sharing.** Each resource lives on exactly one project today.
 - **Per-skill resource scoping.** All resources are visible to every skill on the agent's run; type-aware filtering is a follow-up.
-- **Caching / sync.** `github_repo` is just metadata — checkout still happens via `multica repo checkout` on demand. Cached document text for Notion / Google Docs will arrive with those types.
+- **Caching / sync.** `github_repo` is metadata — checkout still happens via `multica repo checkout` on demand.
 
 These are deliberate omissions — the goal of the first cut is to validate the abstraction with the smallest set of moving parts.

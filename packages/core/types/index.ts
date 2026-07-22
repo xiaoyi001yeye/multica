@@ -79,6 +79,8 @@ export type {
   ListProjectsResponse,
   ProjectResource,
   ProjectResourceType,
+  GitRepositoryProvider,
+  GitRepositoryRole,
   ProjectResourceRef,
   GithubRepoResourceRef,
   LocalDirectoryResourceRef,

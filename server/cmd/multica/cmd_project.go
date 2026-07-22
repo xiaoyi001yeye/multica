@@ -157,10 +157,10 @@ func init() {
 
 	// project resource update — mirrors `add` flags, but every field is
 	// optional so the caller can edit one thing at a time.
-	projectResourceUpdateCmd.Flags().String("url", "", "Shortcut: new repo URL (github_repo)")
+	projectResourceUpdateCmd.Flags().String("url", "", "Repository URL is immutable; remove + add to change it")
 	projectResourceUpdateCmd.Flags().String("default-branch-hint", "", "Shortcut: new default branch hint (github_repo)")
 	projectResourceUpdateCmd.Flags().String("local-path", "", "Shortcut: new absolute local path (local_directory)")
-	projectResourceUpdateCmd.Flags().String("daemon-id", "", "Shortcut: new daemon id (local_directory)")
+	projectResourceUpdateCmd.Flags().String("daemon-id", "", "Daemon id is immutable; remove + add on another daemon")
 	projectResourceUpdateCmd.Flags().String("ref-label", "", "Shortcut: new label embedded in resource_ref (local_directory)")
 	projectResourceUpdateCmd.Flags().String("ref", "", "Generic JSON resource_ref payload — overrides per-type shortcuts when set")
 	projectResourceUpdateCmd.Flags().String("label", "", "New human-readable label; pass an empty string to clear")
@@ -709,7 +709,7 @@ func runProjectResourceUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(body) == 0 {
-		return fmt.Errorf("nothing to update — pass --ref / --url / --local-path / --label / --position / --clear-label")
+		return fmt.Errorf("nothing to update — pass --ref / --default-branch-hint / --local-path / --ref-label / --label / --position / --clear-label")
 	}
 
 	var result map[string]any
@@ -752,14 +752,14 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 		// Seed from the existing row so a `--default-branch-hint` edit doesn't
 		// clobber the `url` (server overwrites resource_ref wholesale).
 		if existingRef != nil {
-			if u, ok := existingRef["url"].(string); ok && strings.TrimSpace(u) != "" {
-				ref["url"] = strings.TrimSpace(u)
-			}
-			if h, ok := existingRef["default_branch_hint"].(string); ok && strings.TrimSpace(h) != "" {
-				ref["default_branch_hint"] = strings.TrimSpace(h)
+			for key, value := range existingRef {
+				ref[key] = value
 			}
 		}
 		if urlSet {
+			if existingRef != nil {
+				return nil, false, fmt.Errorf("github_repo URL cannot be changed; remove the resource and add the new repository")
+			}
 			urlVal, _ := cmd.Flags().GetString("url")
 			urlVal = strings.TrimSpace(urlVal)
 			if urlVal == "" {
@@ -788,14 +788,8 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 		}
 		ref := map[string]any{}
 		if existingRef != nil {
-			if p, ok := existingRef["local_path"].(string); ok && strings.TrimSpace(p) != "" {
-				ref["local_path"] = strings.TrimSpace(p)
-			}
-			if d, ok := existingRef["daemon_id"].(string); ok && strings.TrimSpace(d) != "" {
-				ref["daemon_id"] = strings.TrimSpace(d)
-			}
-			if l, ok := existingRef["label"].(string); ok && strings.TrimSpace(l) != "" {
-				ref["label"] = strings.TrimSpace(l)
+			for key, value := range existingRef {
+				ref[key] = value
 			}
 		}
 		if pathSet {
@@ -806,6 +800,9 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 			ref["local_path"] = pathVal
 		}
 		if daemonSet {
+			if existingRef != nil {
+				return nil, false, fmt.Errorf("local_directory daemon id cannot be changed; remove the resource and add it on the target daemon")
+			}
 			daemonVal := strings.TrimSpace(mustString(cmd, "daemon-id"))
 			if daemonVal == "" {
 				return nil, false, fmt.Errorf("--daemon-id cannot be empty")

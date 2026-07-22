@@ -15,6 +15,8 @@ import type {
   CreateBillingPortalSessionResponse,
   GroupedIssuesResponse,
   ListIssuesResponse,
+  ListProjectResourcesResponse,
+  ProjectResource,
   ListWebhookDeliveriesResponse,
   Squad,
   TimelineEntry,
@@ -247,6 +249,72 @@ export const ListIssuesResponseSchema = z.object({
 
 export const EMPTY_LIST_ISSUES_RESPONSE: ListIssuesResponse = {
   issues: [],
+  total: 0,
+};
+
+export const ProjectResourceSchema = z
+  .object({
+    id: z.string(),
+    project_id: z.string(),
+    workspace_id: z.string(),
+    resource_type: z.string(),
+    resource_ref: z.record(z.string(), z.unknown()),
+    label: z.string().nullable().optional().default(null),
+    position: z.number().optional().default(0),
+    created_at: z.string().optional().default(""),
+    created_by: z.string().nullable().optional().default(null),
+  })
+  .loose()
+  .superRefine((resource, ctx) => {
+    if (
+      resource.resource_type === "github_repo" &&
+      typeof resource.resource_ref.url !== "string"
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["resource_ref", "url"],
+        message: "github_repo url must be a string",
+      });
+    }
+    if (resource.resource_type === "local_directory") {
+      if (typeof resource.resource_ref.local_path !== "string") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["resource_ref", "local_path"],
+          message: "local_directory local_path must be a string",
+        });
+      }
+      if (typeof resource.resource_ref.daemon_id !== "string") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["resource_ref", "daemon_id"],
+          message: "local_directory daemon_id must be a string",
+        });
+      }
+    }
+  });
+
+export const ListProjectResourcesResponseSchema = z
+  .object({
+    resources: z.array(ProjectResourceSchema).default([]),
+    total: z.number().default(0),
+  })
+  .loose();
+
+export const EMPTY_PROJECT_RESOURCE: ProjectResource = {
+  id: "",
+  project_id: "",
+  workspace_id: "",
+  resource_type: "github_repo",
+  resource_ref: { url: "" },
+  label: null,
+  position: 0,
+  created_at: "",
+  created_by: null,
+};
+
+export const EMPTY_LIST_PROJECT_RESOURCES_RESPONSE: ListProjectResourcesResponse = {
+  resources: [],
   total: 0,
 };
 

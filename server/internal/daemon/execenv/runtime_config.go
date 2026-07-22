@@ -122,16 +122,55 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 		var payload struct {
 			URL               string `json:"url"`
 			DefaultBranchHint string `json:"default_branch_hint,omitempty"`
+			Provider          string `json:"provider,omitempty"`
+			Role              string `json:"role,omitempty"`
+			PRCreationGuide   string `json:"pr_creation_guide,omitempty"`
 		}
 		_ = json.Unmarshal(r.ResourceRef, &payload)
-		out := fmt.Sprintf("**GitHub repo**: %s", payload.URL)
+		out := fmt.Sprintf("**Git repository**: %s", payload.URL)
+		var metadata []string
+		if payload.Provider != "" {
+			metadata = append(metadata, "provider: `"+singleLineBriefValue(payload.Provider)+"`")
+		}
 		if payload.DefaultBranchHint != "" {
-			out += fmt.Sprintf(" (default branch: `%s`)", payload.DefaultBranchHint)
+			metadata = append(metadata, "default branch: `"+singleLineBriefValue(payload.DefaultBranchHint)+"`")
+		}
+		if payload.Role != "" {
+			metadata = append(metadata, "role: `"+singleLineBriefValue(payload.Role)+"`")
+		}
+		if len(metadata) > 0 {
+			out += " (" + strings.Join(metadata, ", ") + ")"
 		}
 		if label != "" {
-			out += " — " + label
+			out += " — " + singleLineBriefValue(label)
+		}
+		if payload.DefaultBranchHint != "" {
+			out += fmt.Sprintf("\n  - Use `multica repo checkout %s --ref %s` when starting from the configured default branch.", payload.URL, payload.DefaultBranchHint)
+		}
+		if payload.PRCreationGuide != "" {
+			out += "\n  - PR/MR guide: " + singleLineBriefValue(payload.PRCreationGuide)
 		}
 		return out
+	case "local_directory":
+		var payload struct {
+			LocalPath string `json:"local_path"`
+			DaemonID  string `json:"daemon_id"`
+			Label     string `json:"label,omitempty"`
+		}
+		_ = json.Unmarshal(r.ResourceRef, &payload)
+		display := payload.Label
+		if display == "" {
+			display = label
+		}
+		if display == "" {
+			display = localPathSummaryForBrief(payload.LocalPath)
+		}
+		return fmt.Sprintf(
+			"**Local directory**: %s — path: `%s`, daemon: `%s` (used in-place when this daemon runs the task; Git repositories remain remote fallback context)",
+			singleLineBriefValue(display),
+			singleLineBriefValue(localPathSummaryForBrief(payload.LocalPath)),
+			singleLineBriefValue(payload.DaemonID),
+		)
 	default:
 		ref := string(r.ResourceRef)
 		if ref == "" {
@@ -143,6 +182,20 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 		}
 		return out
 	}
+}
+
+func singleLineBriefValue(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func localPathSummaryForBrief(path string) string {
+	cleaned := filepath.Clean(path)
+	base := filepath.Base(cleaned)
+	parent := filepath.Base(filepath.Dir(cleaned))
+	if parent == "." || parent == string(filepath.Separator) || parent == "" {
+		return base
+	}
+	return filepath.Join(parent, base)
 }
 
 // InjectRuntimeConfig writes the meta skill content into the runtime-specific

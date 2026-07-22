@@ -84,6 +84,9 @@ func validateAndNormalizeResourceRef(resourceType string, ref json.RawMessage) (
 type githubRepoRef struct {
 	URL               string `json:"url"`
 	DefaultBranchHint string `json:"default_branch_hint,omitempty"`
+	Provider          string `json:"provider,omitempty"`
+	Role              string `json:"role,omitempty"`
+	PRCreationGuide   string `json:"pr_creation_guide,omitempty"`
 }
 
 func validateGithubRepoRef(ref json.RawMessage) (json.RawMessage, error) {
@@ -99,11 +102,62 @@ func validateGithubRepoRef(ref json.RawMessage) (json.RawMessage, error) {
 		return nil, errors.New("github_repo: url must be a valid http(s) or ssh git URL")
 	}
 	payload.DefaultBranchHint = strings.TrimSpace(payload.DefaultBranchHint)
+	if strings.ContainsAny(payload.DefaultBranchHint, "\r\n") || len(payload.DefaultBranchHint) > 255 {
+		return nil, errors.New("github_repo: default_branch_hint must be a single line no longer than 255 characters")
+	}
+	payload.Provider = strings.ToLower(strings.TrimSpace(payload.Provider))
+	if payload.Provider == "" {
+		payload.Provider = inferGitProvider(payload.URL)
+	}
+	if !isOneOf(payload.Provider, "github", "gitlab", "self_hosted", "generic") {
+		return nil, errors.New("github_repo: provider must be github, gitlab, self_hosted, or generic")
+	}
+	payload.Role = strings.ToLower(strings.TrimSpace(payload.Role))
+	if payload.Role != "" && !isOneOf(payload.Role, "frontend", "backend", "docs", "infra", "other") {
+		return nil, errors.New("github_repo: role must be frontend, backend, docs, infra, or other")
+	}
+	payload.PRCreationGuide = strings.TrimSpace(payload.PRCreationGuide)
+	if len(payload.PRCreationGuide) > 4000 {
+		return nil, errors.New("github_repo: pr_creation_guide must be no longer than 4000 characters")
+	}
 	out, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+func isOneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func inferGitProvider(rawURL string) string {
+	host := ""
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Hostname() != "" {
+		host = parsed.Hostname()
+	} else {
+		beforePath := rawURL
+		if colon := strings.Index(beforePath, ":"); colon >= 0 {
+			beforePath = beforePath[:colon]
+		}
+		if at := strings.LastIndex(beforePath, "@"); at >= 0 {
+			beforePath = beforePath[at+1:]
+		}
+		host = beforePath
+	}
+	switch strings.ToLower(host) {
+	case "github.com":
+		return "github"
+	case "gitlab.com":
+		return "gitlab"
+	default:
+		return "self_hosted"
+	}
 }
 
 // localDirectoryRef is the JSONB shape stored for resource_type=local_directory.
@@ -283,6 +337,13 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "this daemon already has a local_directory attached to the project; remove it before adding another")
 		return
 	}
+	if conflict, err := h.findGithubRepoURLConflict(r.Context(), project.ID, req.ResourceType, normalizedRef); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
+		return
+	} else if conflict {
+		writeError(w, http.StatusConflict, "this Git repository is already attached to the project")
+		return
+	}
 
 	var label pgtype.Text
 	if req.Label != nil && strings.TrimSpace(*req.Label) != "" {
@@ -375,6 +436,10 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := validateResourceIdentityUnchanged(existing.ResourceType, existing.ResourceRef, normalized); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		nextRef = normalized
 	}
 
@@ -438,6 +503,34 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func validateResourceIdentityUnchanged(resourceType string, current, next json.RawMessage) error {
+	switch resourceType {
+	case "github_repo":
+		var currentRef, nextRef githubRepoRef
+		if err := json.Unmarshal(current, &currentRef); err != nil {
+			return fmt.Errorf("github_repo: invalid existing resource_ref: %w", err)
+		}
+		if err := json.Unmarshal(next, &nextRef); err != nil {
+			return fmt.Errorf("github_repo: invalid resource_ref: %w", err)
+		}
+		if strings.TrimSpace(currentRef.URL) != nextRef.URL {
+			return errors.New("github_repo: url cannot be changed; remove the resource and add the new repository")
+		}
+	case "local_directory":
+		var currentRef, nextRef localDirectoryRef
+		if err := json.Unmarshal(current, &currentRef); err != nil {
+			return fmt.Errorf("local_directory: invalid existing resource_ref: %w", err)
+		}
+		if err := json.Unmarshal(next, &nextRef); err != nil {
+			return fmt.Errorf("local_directory: invalid resource_ref: %w", err)
+		}
+		if strings.TrimSpace(currentRef.DaemonID) != nextRef.DaemonID {
+			return errors.New("local_directory: daemon_id cannot be changed; remove the resource and add it on the target daemon")
+		}
+	}
+	return nil
+}
+
 // findLocalDirectoryConflict enforces "at most one local_directory resource
 // per (project, daemon)". The daemon picks the first matching daemon_id row
 // out of a task's resources (findLocalDirectoryAssignment), so letting a
@@ -479,6 +572,33 @@ func (h *Handler) findLocalDirectoryConflict(ctx context.Context, projectID pgty
 		// user device); the daemon-side resolver routes each daemon to
 		// its own assignment by daemon_id.
 		if existing.DaemonID == incoming.DaemonID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (h *Handler) findGithubRepoURLConflict(ctx context.Context, projectID pgtype.UUID, resourceType string, normalizedRef json.RawMessage) (bool, error) {
+	if resourceType != "github_repo" {
+		return false, nil
+	}
+	var incoming githubRepoRef
+	if err := json.Unmarshal(normalizedRef, &incoming); err != nil {
+		return false, err
+	}
+	rows, err := h.Queries.ListProjectResources(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if row.ResourceType != "github_repo" {
+			continue
+		}
+		var existing githubRepoRef
+		if err := json.Unmarshal(row.ResourceRef, &existing); err != nil {
+			continue
+		}
+		if strings.TrimSpace(existing.URL) == incoming.URL {
 			return true, nil
 		}
 	}

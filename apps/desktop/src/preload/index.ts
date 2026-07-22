@@ -162,6 +162,9 @@ const desktopAPI = {
   /** Validate that a path is an existing readable+writable directory. */
   validateLocalDirectory: (path: string) =>
     ipcRenderer.invoke("local-directory:validate", path),
+  /** Check Git access using the active local daemon's credentials. */
+  checkRepositoryAccess: (url: string) =>
+    ipcRenderer.invoke("daemon:check-repo", url),
 };
 
 interface DaemonStatus {

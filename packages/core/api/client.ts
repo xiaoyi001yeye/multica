@@ -151,6 +151,8 @@ import {
   EMPTY_CREATE_AGENT_FROM_TEMPLATE_RESPONSE,
   EMPTY_GROUPED_ISSUES_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
+  EMPTY_LIST_PROJECT_RESOURCES_RESPONSE,
+  EMPTY_PROJECT_RESOURCE,
   EMPTY_SQUAD,
   EMPTY_SQUAD_LIST,
   EMPTY_SQUAD_MEMBER_STATUS_LIST,
@@ -162,6 +164,8 @@ import {
   type AppConfigResponse,
   GroupedIssuesResponseSchema,
   ListIssuesResponseSchema,
+  ListProjectResourcesResponseSchema,
+  ProjectResourceSchema,
   ListWebhookDeliveriesResponseSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
@@ -1771,16 +1775,25 @@ export class ApiClient {
   async listProjectResources(
     projectId: string,
   ): Promise<ListProjectResourcesResponse> {
-    return this.fetch(`/api/projects/${projectId}/resources`);
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/resources`);
+    return parseWithFallback(
+      raw,
+      ListProjectResourcesResponseSchema,
+      EMPTY_LIST_PROJECT_RESOURCES_RESPONSE,
+      { endpoint: "GET /api/projects/{id}/resources" },
+    );
   }
 
   async createProjectResource(
     projectId: string,
     data: CreateProjectResourceRequest,
   ): Promise<ProjectResource> {
-    return this.fetch(`/api/projects/${projectId}/resources`, {
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/resources`, {
       method: "POST",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ProjectResourceSchema, EMPTY_PROJECT_RESOURCE, {
+      endpoint: "POST /api/projects/{id}/resources",
     });
   }
 
@@ -1789,9 +1802,15 @@ export class ApiClient {
     resourceId: string,
     data: UpdateProjectResourceRequest,
   ): Promise<ProjectResource> {
-    return this.fetch(`/api/projects/${projectId}/resources/${resourceId}`, {
+    const raw = await this.fetch<unknown>(
+      `/api/projects/${projectId}/resources/${resourceId}`,
+      {
       method: "PUT",
       body: JSON.stringify(data),
+      },
+    );
+    return parseWithFallback(raw, ProjectResourceSchema, EMPTY_PROJECT_RESOURCE, {
+      endpoint: "PUT /api/projects/{id}/resources/{resourceId}",
     });
   }
 
