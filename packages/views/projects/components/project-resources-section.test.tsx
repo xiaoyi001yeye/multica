@@ -66,13 +66,15 @@ function renderSection() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const ui = () => (
     <QueryClientProvider client={client}>
       <I18nProvider locale="en" resources={TEST_RESOURCES}>
         <ProjectResourcesSection projectId="project-1" />
       </I18nProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const rendered = render(ui());
+  return { ...rendered, rerenderSection: () => rendered.rerender(ui()) };
 }
 
 describe("ProjectResourcesSection", () => {
@@ -167,6 +169,45 @@ describe("ProjectResourcesSection", () => {
     expect(mockPlatform.checkRepositoryAccess).toHaveBeenCalledWith(
       "git@gitlab.com:group/repo.git",
     );
+  });
+
+  it("tracks desktop daemon availability and clears a failed access check", async () => {
+    mockPlatform.desktop = true;
+    mockPlatform.daemonRunning = false;
+    mockPlatform.checkRepositoryAccess.mockRejectedValue(new Error("gone"));
+
+    const view = renderSection();
+    expect(await screen.findByRole("button", { name: "Daemon offline" })).toBeDisabled();
+
+    mockPlatform.daemonRunning = true;
+    view.rerenderSection();
+    const check = await screen.findByRole("button", { name: "Not checked" });
+    fireEvent.click(check);
+    expect(await screen.findByRole("button", { name: "Network failed" })).toBeEnabled();
+
+    mockPlatform.daemonRunning = false;
+    view.rerenderSection();
+    expect(await screen.findByRole("button", { name: "Daemon offline" })).toBeDisabled();
+  });
+
+  it("renders an unknown resource type instead of dropping it", async () => {
+    mockApi.listProjectResources.mockResolvedValue({
+      resources: [
+        {
+          ...repository,
+          id: "resource-new",
+          resource_type: "design_file",
+          resource_ref: { document_id: "doc-1" },
+          label: "Design source",
+        },
+      ],
+      total: 1,
+    });
+
+    renderSection();
+    expect(await screen.findByText("Other resources")).toBeInTheDocument();
+    expect(screen.getByText("Design source")).toBeInTheDocument();
+    expect(screen.getByText("design_file")).toBeInTheDocument();
   });
 
   it("lets web bind an offline local runtime and excludes cloud runtimes", async () => {

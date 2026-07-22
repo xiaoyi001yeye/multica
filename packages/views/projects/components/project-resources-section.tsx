@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { TFunction } from "i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -102,6 +102,9 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
 
   const repositories = resources.filter(isGithubRef);
   const localDirectories = resources.filter(isLocalDirectoryRef);
+  const unknownResources = resources.filter(
+    (resource) => !isGithubRef(resource) && !isLocalDirectoryRef(resource),
+  );
   const runtimeMachines = useMemo(() => localRuntimeMachines(runtimes), [runtimes]);
 
   const remove = async (resource: ProjectResource) => {
@@ -212,6 +215,21 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
             </ResourceGroup>
           )}
 
+          {unknownResources.length > 0 && (
+            <ResourceGroup title={t(($) => $.resources.other_resources_group)}>
+              {unknownResources.map((resource, index) => (
+                <UnknownResourceRow
+                  key={resource.id}
+                  resource={resource}
+                  canMoveUp={index > 0}
+                  canMoveDown={index < unknownResources.length - 1}
+                  onMove={move}
+                  onRemove={() => remove(resource)}
+                />
+              ))}
+            </ResourceGroup>
+          )}
+
           <Popover open={addOpen} onOpenChange={setAddOpen}>
             <PopoverTrigger
               render={
@@ -237,15 +255,23 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                 )}
                 pending={createResource.isPending}
                 onCreate={async (data, saveToWorkspace) => {
-                  const created = await createResource.mutateAsync(data);
-                  if (
-                    saveToWorkspace &&
-                    created.resource_type === "github_repo" &&
-                    isGithubRef(created)
-                  ) {
-                    await saveWorkspaceRepository(created.resource_ref.url);
+                  try {
+                    const created = await createResource.mutateAsync(data);
+                    if (
+                      saveToWorkspace &&
+                      created.resource_type === "github_repo" &&
+                      isGithubRef(created)
+                    ) {
+                      await saveWorkspaceRepository(created.resource_ref.url);
+                    }
+                    setAddOpen(false);
+                  } catch (error) {
+                    toast.error(
+                      error instanceof Error
+                        ? error.message
+                        : t(($) => $.resources.toast_save_failed),
+                    );
                   }
-                  setAddOpen(false);
                 }}
               />
             </PopoverContent>
@@ -273,11 +299,45 @@ function ResourceGroup({
   );
 }
 
+function UnknownResourceRow({
+  resource,
+  canMoveUp,
+  canMoveDown,
+  onMove,
+  onRemove,
+}: {
+  resource: ProjectResource;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onMove: (resourceId: string, direction: "up" | "down") => Promise<void>;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="group flex items-center gap-2 rounded-md border border-transparent px-1.5 py-1.5 hover:border-border hover:bg-accent/30">
+      <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs font-medium">
+          {resource.label || resource.resource_type}
+        </div>
+        <div className="truncate text-[10px] text-muted-foreground">
+          {resource.resource_type}
+        </div>
+      </div>
+      <RowActions
+        canMoveUp={canMoveUp}
+        canMoveDown={canMoveDown}
+        onMove={(direction) => void onMove(resource.id, direction)}
+        onRemove={onRemove}
+      />
+    </div>
+  );
+}
+
 interface RowActionsProps {
   canMoveUp: boolean;
   canMoveDown: boolean;
   onMove: (direction: "up" | "down") => void;
-  onEdit: () => void;
+  onEdit?: () => void;
   onRemove: () => void;
 }
 
@@ -305,9 +365,11 @@ function RowActions({
       >
         <ArrowDown className="size-3" />
       </IconButton>
-      <IconButton label={t(($) => $.resources.edit_tooltip)} onClick={onEdit}>
-        <Pencil className="size-3" />
-      </IconButton>
+      {onEdit && (
+        <IconButton label={t(($) => $.resources.edit_tooltip)} onClick={onEdit}>
+          <Pencil className="size-3" />
+        </IconButton>
+      )}
       <IconButton label={t(($) => $.resources.remove_tooltip)} onClick={onRemove}>
         <Trash2 className="size-3" />
       </IconButton>
@@ -372,12 +434,26 @@ function RepositoryRow({
   const [checking, setChecking] = useState(false);
   const ref = resource.resource_ref;
   const provider = ref.provider ?? gitProviderFromUrl(ref.url);
+  const desktop = isDesktopShell();
+
+  useEffect(() => {
+    setAccess((current) => {
+      if (!desktop) return "not_checked";
+      if (!canCheckAccess) return "daemon_offline";
+      return current === "daemon_offline" ? "not_checked" : current;
+    });
+  }, [canCheckAccess, desktop]);
 
   const check = async () => {
     setChecking(true);
-    const result = await checkRepositoryAccess(ref.url);
-    setAccess(result.status);
-    setChecking(false);
+    try {
+      const result = await checkRepositoryAccess(ref.url);
+      setAccess(result.status);
+    } catch {
+      setAccess("network_failed");
+    } finally {
+      setChecking(false);
+    }
   };
 
   return (
@@ -482,6 +558,12 @@ function RepositoryEditForm({
               pr_creation_guide: guide.trim() || undefined,
             },
           });
+        } catch (error) {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t(($) => $.resources.toast_save_failed),
+          );
         } finally {
           setSaving(false);
         }
@@ -566,14 +648,9 @@ function LocalDirectoryRow({
       <div className="flex items-start gap-2">
         <FolderOpen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
-          <Tooltip>
-            <TooltipTrigger
-              render={<div className="truncate text-xs font-medium">{label}</div>}
-            />
-            <TooltipContent side="top" className="max-w-sm break-all font-mono">
-              {ref.local_path}
-            </TooltipContent>
-          </Tooltip>
+          <div className="truncate text-xs font-medium" title={label}>
+            {label}
+          </div>
           <div className="truncate text-[10px] text-muted-foreground">
             {localPathSummary(ref.local_path)} · {machine?.name ?? shortDaemonId(ref.daemon_id)}
           </div>
@@ -650,6 +727,12 @@ function LocalDirectoryEditForm({
             local_path: path.trim(),
             label: label.trim() || undefined,
           });
+        } catch (error) {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t(($) => $.resources.toast_save_failed),
+          );
         } finally {
           setSaving(false);
         }

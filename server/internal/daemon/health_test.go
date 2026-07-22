@@ -198,6 +198,37 @@ func TestClassifyRepoCheckFailure(t *testing.T) {
 	}
 }
 
+func TestRepoCheckURLSafety(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		url  string
+		want bool
+	}{
+		{"https://github.com/acme/repo.git", true},
+		{"ssh://git@gitlab.com/acme/repo.git", true},
+		{"git@gitlab.com:acme/repo.git", true},
+		{"file:///etc/passwd", false},
+		{"/tmp/repo", false},
+		{"ext::sh -c id", false},
+		{"--upload-pack=touch", false},
+		{"https://github.com/", false},
+	} {
+		if got := isSafeRepoCheckURL(tc.url); got != tc.want {
+			t.Errorf("isSafeRepoCheckURL(%q) = %v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
+func TestRepoCheckOriginSafety(t *testing.T) {
+	t.Parallel()
+	if !isTrustedRepoCheckOrigin("") || !isTrustedRepoCheckOrigin("http://localhost:3000") {
+		t.Fatal("local callers should be accepted")
+	}
+	if isTrustedRepoCheckOrigin("https://attacker.example") {
+		t.Fatal("non-loopback browser origins must be rejected")
+	}
+}
+
 func TestHealthHandlerRespondsWhileTaskRepoLookupWaits(t *testing.T) {
 	const workspaceID = "ws-health"
 	const repoURL = "https://github.com/org/repo.git"

@@ -529,7 +529,7 @@ func runProjectResourceList(cmd *cobra.Command, args []string) error {
 	}
 
 	fullID, _ := cmd.Flags().GetBool("full-id")
-	headers := []string{"ID", "TYPE", "REF", "LABEL"}
+	headers := []string{"ID", "TYPE", "LABEL", "DAEMON", "REF"}
 	rows := make([][]string, 0, len(resourcesRaw))
 	for _, raw := range resourcesRaw {
 		r, ok := raw.(map[string]any)
@@ -539,8 +539,9 @@ func runProjectResourceList(cmd *cobra.Command, args []string) error {
 		rows = append(rows, []string{
 			displayID(strVal(r, "id"), fullID),
 			strVal(r, "resource_type"),
-			summarizeResourceRef(r["resource_ref"]),
 			strVal(r, "label"),
+			resourceRefString(r["resource_ref"], "daemon_id"),
+			summarizeResourceRef(r["resource_ref"]),
 		})
 	}
 	cli.PrintTable(os.Stdout, headers, rows)
@@ -586,6 +587,9 @@ func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
 			if pathVal == "" || daemonVal == "" {
 				return fmt.Errorf("local_directory requires --local-path and --daemon-id (or pass a JSON payload via --ref)")
 			}
+			if !isCrossPlatformAbsolutePath(pathVal) {
+				return fmt.Errorf("local_directory --local-path must be an absolute path")
+			}
 			ref := map[string]any{"local_path": pathVal, "daemon_id": daemonVal}
 			if refLabel, _ := cmd.Flags().GetString("ref-label"); strings.TrimSpace(refLabel) != "" {
 				ref["label"] = strings.TrimSpace(refLabel)
@@ -620,10 +624,12 @@ func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
 
 	output, _ := cmd.Flags().GetString("output")
 	if output == "table" {
-		headers := []string{"ID", "TYPE", "REF"}
+		headers := []string{"ID", "TYPE", "LABEL", "DAEMON", "REF"}
 		rows := [][]string{{
 			strVal(result, "id"),
 			strVal(result, "resource_type"),
+			strVal(result, "label"),
+			resourceRefString(result["resource_ref"], "daemon_id"),
 			summarizeResourceRef(result["resource_ref"]),
 		}}
 		cli.PrintTable(os.Stdout, headers, rows)
@@ -878,12 +884,39 @@ func summarizeResourceRef(raw any) string {
 		return u
 	}
 	if p, ok := m["local_path"].(string); ok && p != "" {
-		return p
+		return summarizeLocalPath(p)
 	}
 	if data, err := json.Marshal(m); err == nil {
 		return string(data)
 	}
 	return ""
+}
+
+func resourceRefString(raw any, key string) string {
+	m, _ := raw.(map[string]any)
+	value, _ := m[key].(string)
+	return value
+}
+
+func summarizeLocalPath(raw string) string {
+	parts := strings.FieldsFunc(strings.TrimSpace(raw), func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return "…/" + strings.Join(parts[len(parts)-2:], "/")
+}
+
+func isCrossPlatformAbsolutePath(path string) bool {
+	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\\`) {
+		return true
+	}
+	return len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) &&
+		path[1] == ':' && (path[2] == '/' || path[2] == '\\')
 }
 
 // ---------------------------------------------------------------------------

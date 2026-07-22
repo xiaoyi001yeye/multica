@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -73,9 +74,16 @@ type repoCheckResponse struct {
 }
 
 func (d *Daemon) repoCheckHandler() http.HandlerFunc {
+	// A browser page can reach loopback too. Bound concurrent git processes so
+	// a buggy or hostile local caller cannot exhaust the machine.
+	slots := make(chan struct{}, 4)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !isTrustedRepoCheckOrigin(r.Header.Get("Origin")) {
+			http.Error(w, "cross-origin requests are not allowed", http.StatusForbidden)
 			return
 		}
 		var req repoCheckRequest
@@ -84,15 +92,25 @@ func (d *Daemon) repoCheckHandler() http.HandlerFunc {
 			return
 		}
 		req.URL = strings.TrimSpace(req.URL)
-		if req.URL == "" {
-			http.Error(w, "url is required", http.StatusBadRequest)
+		if !isSafeRepoCheckURL(req.URL) {
+			http.Error(w, "url must be a valid http(s), ssh, or git repository URL", http.StatusBadRequest)
+			return
+		}
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		default:
+			http.Error(w, "too many repository checks", http.StatusTooManyRequests)
 			return
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", req.URL)
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		cmd.Env = append(os.Environ(),
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_ALLOW_PROTOCOL=http:https:ssh:git",
+		)
 		output, err := cmd.CombinedOutput()
 		status := "accessible"
 		if err != nil {
@@ -105,6 +123,48 @@ func (d *Daemon) repoCheckHandler() http.HandlerFunc {
 			CheckedAt: time.Now().UTC().Format(time.RFC3339),
 		})
 	}
+}
+
+func isTrustedRepoCheckOrigin(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true // Electron main process and CLI requests do not send Origin.
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSafeRepoCheckURL(raw string) bool {
+	if raw == "" || strings.HasPrefix(raw, "-") || strings.ContainsAny(raw, "\r\n\x00") {
+		return false
+	}
+	if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https", "ssh", "git":
+			return parsed.Path != "" && parsed.Path != "/"
+		}
+	}
+	// SCP-like SSH form: [user@]host:path. Local paths, file:// URLs and
+	// remote-helper syntax are deliberately excluded.
+	if strings.ContainsAny(raw, " \t") || strings.Contains(raw, "://") {
+		return false
+	}
+	colon := strings.IndexByte(raw, ':')
+	if colon <= 0 || colon == len(raw)-1 {
+		return false
+	}
+	prefix := raw[:colon]
+	if at := strings.LastIndexByte(prefix, '@'); at >= 0 {
+		prefix = prefix[at+1:]
+	}
+	return prefix != "" && !strings.ContainsAny(prefix, `/\\`)
 }
 
 func classifyRepoCheckFailure(output string) string {

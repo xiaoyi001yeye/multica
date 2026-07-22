@@ -185,6 +185,9 @@ func validateLocalDirectoryRef(ref json.RawMessage) (json.RawMessage, error) {
 	if !isAbsoluteLocalPath(payload.LocalPath) {
 		return nil, errors.New("local_directory: local_path must be an absolute path")
 	}
+	if isUnsafeLocalPath(payload.LocalPath) {
+		return nil, errors.New("local_directory: local_path must not be a system root or temporary directory")
+	}
 	payload.DaemonID = strings.TrimSpace(payload.DaemonID)
 	if payload.DaemonID == "" {
 		return nil, errors.New("local_directory: daemon_id is required")
@@ -220,6 +223,19 @@ func isAbsoluteLocalPath(s string) bool {
 
 func isDriveLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func isUnsafeLocalPath(raw string) bool {
+	normalized := strings.TrimRight(strings.ReplaceAll(raw, `\`, "/"), "/")
+	if normalized == "" || (len(normalized) == 2 && isDriveLetter(normalized[0]) && normalized[1] == ':') {
+		return true
+	}
+	switch strings.ToLower(normalized) {
+	case "/", "/users", "/users/shared", "/home", "/root", "/etc", "/tmp", "/private/tmp", "/var", "/usr", "/opt":
+		return true
+	default:
+		return false
+	}
 }
 
 // isValidGitRepoURL accepts the three forms a user can paste from GitHub's
@@ -330,14 +346,39 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if conflict, err := h.findLocalDirectoryConflict(r.Context(), project.ID, req.ResourceType, normalizedRef, pgtype.UUID{}); err != nil {
+	if h.TxStarter == nil {
+		writeError(w, http.StatusInternalServerError, "database transaction support is unavailable")
+		return
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start resource creation")
+		return
+	}
+	defer tx.Rollback(r.Context()) // no-op after Commit
+
+	// Serialize resource creation per project. The semantic uniqueness rules
+	// below inspect JSON fields that the legacy full-JSON unique constraint
+	// cannot express, so a check-then-insert without this lock is racy.
+	if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtext($1))`, "project_resources:"+uuidToString(project.ID)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock project resources")
+		return
+	}
+	qtx := db.New(tx)
+	rows, err := qtx.ListProjectResources(r.Context(), project.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
+		return
+	}
+
+	if conflict, err := localDirectoryConflictInRows(rows, req.ResourceType, normalizedRef, pgtype.UUID{}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
 		return
 	} else if conflict {
 		writeError(w, http.StatusConflict, "this daemon already has a local_directory attached to the project; remove it before adding another")
 		return
 	}
-	if conflict, err := h.findGithubRepoURLConflict(r.Context(), project.ID, req.ResourceType, normalizedRef); err != nil {
+	if conflict, err := githubRepoURLConflictInRows(rows, req.ResourceType, normalizedRef); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check existing resources")
 		return
 	} else if conflict {
@@ -354,12 +395,11 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		position = *req.Position
 	} else {
 		// Append after existing resources.
-		count, _ := h.Queries.CountProjectResources(r.Context(), project.ID)
-		position = int32(count)
+		position = int32(len(rows))
 	}
 
 	creator, _ := h.parseUserUUIDOrZero(userID)
-	resource, err := h.Queries.CreateProjectResource(r.Context(), db.CreateProjectResourceParams{
+	resource, err := qtx.CreateProjectResource(r.Context(), db.CreateProjectResourceParams{
 		ProjectID:    project.ID,
 		WorkspaceID:  project.WorkspaceID,
 		ResourceType: req.ResourceType,
@@ -374,6 +414,10 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create project resource")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit project resource")
 		return
 	}
 
@@ -545,15 +589,19 @@ func validateResourceIdentityUnchanged(resourceType string, current, next json.R
 //
 // `excludeID` lets the update path ignore the row being edited.
 func (h *Handler) findLocalDirectoryConflict(ctx context.Context, projectID pgtype.UUID, resourceType string, normalizedRef json.RawMessage, excludeID pgtype.UUID) (bool, error) {
+	rows, err := h.Queries.ListProjectResources(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	return localDirectoryConflictInRows(rows, resourceType, normalizedRef, excludeID)
+}
+
+func localDirectoryConflictInRows(rows []db.ProjectResource, resourceType string, normalizedRef json.RawMessage, excludeID pgtype.UUID) (bool, error) {
 	if resourceType != "local_directory" {
 		return false, nil
 	}
 	var incoming localDirectoryRef
 	if err := json.Unmarshal(normalizedRef, &incoming); err != nil {
-		return false, err
-	}
-	rows, err := h.Queries.ListProjectResources(ctx, projectID)
-	if err != nil {
 		return false, err
 	}
 	for _, row := range rows {
@@ -579,15 +627,19 @@ func (h *Handler) findLocalDirectoryConflict(ctx context.Context, projectID pgty
 }
 
 func (h *Handler) findGithubRepoURLConflict(ctx context.Context, projectID pgtype.UUID, resourceType string, normalizedRef json.RawMessage) (bool, error) {
+	rows, err := h.Queries.ListProjectResources(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	return githubRepoURLConflictInRows(rows, resourceType, normalizedRef)
+}
+
+func githubRepoURLConflictInRows(rows []db.ProjectResource, resourceType string, normalizedRef json.RawMessage) (bool, error) {
 	if resourceType != "github_repo" {
 		return false, nil
 	}
 	var incoming githubRepoRef
 	if err := json.Unmarshal(normalizedRef, &incoming); err != nil {
-		return false, err
-	}
-	rows, err := h.Queries.ListProjectResources(ctx, projectID)
-	if err != nil {
 		return false, err
 	}
 	for _, row := range rows {
