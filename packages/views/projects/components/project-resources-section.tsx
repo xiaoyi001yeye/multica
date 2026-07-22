@@ -473,6 +473,7 @@ function RepositoryRow({
           <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
             <span>{providerLabel(provider)}</span>
             {ref.role && <Pill>{ref.role}</Pill>}
+            {ref.ref && <Pill>{ref.ref}</Pill>}
             {ref.default_branch_hint && <Pill>{ref.default_branch_hint}</Pill>}
             {hasLocalFallback && <Pill>{t(($) => $.resources.remote_fallback)}</Pill>}
             <button
@@ -528,6 +529,7 @@ function RepositoryEditForm({
   const { t } = useT("projects");
   const ref = resource.resource_ref;
   const [label, setLabel] = useState(resource.label ?? "");
+  const [checkoutRef, setCheckoutRef] = useState(ref.ref ?? "");
   const [branch, setBranch] = useState(ref.default_branch_hint ?? "");
   const [role, setRole] = useState<GitRepositoryRole | "">(ref.role ?? "");
   const [guide, setGuide] = useState(ref.pr_creation_guide ?? "");
@@ -545,6 +547,7 @@ function RepositoryEditForm({
             resource_ref: {
               ...ref,
               provider: ref.provider ?? gitProviderFromUrl(ref.url),
+              ref: checkoutRef.trim() || undefined,
               default_branch_hint: branch.trim() || undefined,
               role: role || undefined,
               pr_creation_guide: guide.trim() || undefined,
@@ -566,6 +569,12 @@ function RepositoryEditForm({
         value={label}
         onChange={(event) => setLabel(event.target.value)}
         placeholder={t(($) => $.resources.description_placeholder)}
+        className="h-7 w-full rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      />
+      <input
+        value={checkoutRef}
+        onChange={(event) => setCheckoutRef(event.target.value)}
+        placeholder={t(($) => $.resources.checkout_ref_placeholder)}
         className="h-7 w-full rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
       />
       <div className="grid grid-cols-2 gap-2">
@@ -782,6 +791,7 @@ function AddResourceForm({
   const [type, setType] = useState<"repo" | "local">("repo");
   const [search, setSearch] = useState("");
   const [url, setUrl] = useState("");
+  const [checkoutRef, setCheckoutRef] = useState("");
   const [branch, setBranch] = useState("");
   const [role, setRole] = useState<GitRepositoryRole | "">("");
   const [description, setDescription] = useState("");
@@ -828,6 +838,7 @@ function AddResourceForm({
                 resource_ref: {
                   url: url.trim(),
                   provider: gitProviderFromUrl(url),
+                  ref: checkoutRef.trim() || undefined,
                   default_branch_hint: branch.trim() || undefined,
                   role: role || undefined,
                 },
@@ -876,6 +887,12 @@ function AddResourceForm({
             value={description}
             onChange={(event) => setDescription(event.target.value)}
             placeholder={t(($) => $.resources.description_placeholder)}
+            className="h-8 w-full rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          />
+          <input
+            value={checkoutRef}
+            onChange={(event) => setCheckoutRef(event.target.value)}
+            placeholder={t(($) => $.resources.checkout_ref_placeholder)}
             className="h-8 w-full rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
           <div className="grid grid-cols-2 gap-2">

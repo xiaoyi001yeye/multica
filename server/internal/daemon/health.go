@@ -56,12 +56,13 @@ func (d *Daemon) listenHealth() (net.Listener, error) {
 
 // repoCheckoutRequest is the body of a POST /repo/checkout request.
 type repoCheckoutRequest struct {
-	URL         string `json:"url"`
-	WorkspaceID string `json:"workspace_id"`
-	WorkDir     string `json:"workdir"`
-	Ref         string `json:"ref,omitempty"`
-	AgentName   string `json:"agent_name"`
-	TaskID      string `json:"task_id"`
+	URL          string `json:"url"`
+	WorkspaceID  string `json:"workspace_id"`
+	WorkDir      string `json:"workdir"`
+	Ref          string `json:"ref,omitempty"`
+	AgentName    string `json:"agent_name"`
+	TaskID       string `json:"task_id"`
+	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
 type repoCheckRequest struct {
@@ -271,8 +272,23 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 	mux.HandleFunc("/health", d.healthHandler(startedAt))
 	mux.HandleFunc("/shutdown", d.shutdownHandler())
 	mux.HandleFunc("/repo/check", d.repoCheckHandler())
+	mux.HandleFunc("/repo/checkout", d.repoCheckoutHandler())
 
-	mux.HandleFunc("/repo/checkout", func(w http.ResponseWriter, r *http.Request) {
+	srv := &http.Server{Handler: mux}
+
+	go func() {
+		<-ctx.Done()
+		srv.Close()
+	}()
+
+	d.logger.Info("health server listening", "addr", ln.Addr().String())
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		d.logger.Warn("health server error", "error", err)
+	}
+}
+
+func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -283,6 +299,7 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 			http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		req.URL = strings.TrimSpace(req.URL)
 		if req.URL == "" {
 			http.Error(w, "url is required", http.StatusBadRequest)
 			return
@@ -293,6 +310,10 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 		}
 		if req.WorkDir == "" {
 			http.Error(w, "workdir is required", http.StatusBadRequest)
+			return
+		}
+		if req.CheckoutMode != "" && req.CheckoutMode != repoCheckoutModeIsolated {
+			http.Error(w, "invalid checkout_mode", http.StatusBadRequest)
 			return
 		}
 
@@ -311,14 +332,20 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 			return
 		}
 
+		checkoutRef := strings.TrimSpace(req.Ref)
+		if checkoutRef == "" {
+			checkoutRef = d.taskRepoDefaultRef(req.WorkspaceID, req.TaskID, req.URL)
+		}
+
 		result, err := d.repoCache.CreateWorktree(repocache.WorktreeParams{
 			WorkspaceID:         req.WorkspaceID,
 			RepoURL:             req.URL,
 			WorkDir:             req.WorkDir,
-			Ref:                 req.Ref,
+			Ref:                 checkoutRef,
 			AgentName:           req.AgentName,
 			TaskID:              req.TaskID,
 			CoAuthoredByEnabled: d.workspaceCoAuthoredByEnabled(req.WorkspaceID),
+			IsolatedGitMetadata: req.CheckoutMode == repoCheckoutModeIsolated,
 		})
 		if err != nil {
 			d.logger.Error("repo checkout failed", "url", req.URL, "error", err)
@@ -328,17 +355,5 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
-	})
-
-	srv := &http.Server{Handler: mux}
-
-	go func() {
-		<-ctx.Done()
-		srv.Close()
-	}()
-
-	d.logger.Info("health server listening", "addr", ln.Addr().String())
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		d.logger.Warn("health server error", "error", err)
 	}
 }

@@ -53,6 +53,7 @@ const repository: ProjectResource = {
   resource_ref: {
     url: "git@gitlab.com:group/repo.git",
     provider: "gitlab",
+    ref: "release/v2",
     default_branch_hint: "main",
     role: "backend",
   },
@@ -112,13 +113,18 @@ describe("ProjectResourcesSection", () => {
     });
   });
 
-  it("shows provider, role, and default branch, then edits repository metadata", async () => {
+  it("shows and edits checkout ref, provider, role, and default branch metadata", async () => {
     renderSection();
     expect(await screen.findByText("GitLab")).toBeInTheDocument();
     expect(screen.getByText("backend")).toBeInTheDocument();
+    expect(screen.getByText("release/v2")).toBeInTheDocument();
     expect(screen.getByText("main")).toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText("Edit"));
+    fireEvent.change(
+      screen.getByPlaceholderText("Checkout branch, tag, or commit"),
+      { target: { value: "feature/resources" } },
+    );
     fireEvent.change(screen.getByPlaceholderText("Default branch"), {
       target: { value: "develop" },
     });
@@ -134,6 +140,7 @@ describe("ProjectResourcesSection", () => {
         expect.objectContaining({
           resource_ref: expect.objectContaining({
             url: "git@gitlab.com:group/repo.git",
+            ref: "feature/resources",
             default_branch_hint: "develop",
             role: "docs",
           }),
